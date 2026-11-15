@@ -131,7 +131,9 @@ public class SequenceInfo implements MidiConstants {
         synchronized (PREVIEW_EXPORT_LOCK) {
             AbcExporter exportCopy = abcSong.getAbcExporter();
             // lock so ProjectFrame worker threads don't go in here before previous is finished
-            return new SequenceInfo(exportCopy, useLotroInstruments);
+            SequenceInfo preview = new SequenceInfo(exportCopy, useLotroInstruments);
+            com.digero.maestro.abc.NoteEditorPreviewOverlay.apply(abcSong,preview,exportCopy,useLotroInstruments);
+            return preview;
         }
     }
 

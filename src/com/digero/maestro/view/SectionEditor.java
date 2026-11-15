@@ -67,6 +67,9 @@ public class SectionEditor {
         }
     }
 
+    public static boolean isOpen() { return openDialog != null && openDialog.isDisplayable(); }
+    public static void close() { if (openDialog != null) openDialog.dispose(); }
+
 	public static void show(JFrame jf, NoteGraph noteGraph, AbcPart abcPart, int track, final boolean percussion,
 			final List<DrumPanel> dPanels) {
 		if (openDialog != null)
@@ -117,16 +120,8 @@ public class SectionEditor {
 				abcPart.getAbcSong().addSongListener(songListener);
 				abcPart.addAbcListener(abcPartListener);
 
-				// Add support for using spacebar for pause/play.
-				ActionListener spaceBarListener = ae -> {
-					// Not pretty but is what I got to work
-					// jf.getRootPane().dispatchEvent(ae);
-					ActionListener al = jf.getRootPane().getActionForKeyStroke(KeyStroke.getKeyStroke(' '));
-					if (al != null)
-						al.actionPerformed(ae);
-				};
-				this.getRootPane().registerKeyboardAction(spaceBarListener, KeyStroke.getKeyStroke(' '),
-						JComponent.WHEN_IN_FOCUSED_WINDOW);
+                // Space and remappable navigation shortcuts are owned by
+                // ProjectFrame's shared dispatcher, including this dialog.
 
 				SectionDialog.this.addWindowListener(new WindowAdapter() {
 
@@ -330,10 +325,11 @@ public class SectionEditor {
 							}
 						}
 					} else {
-						noteGraph.setShowingNoteVelocity(false);
-						if (dPanels != null) {
-							for (DrumPanel drum : dPanels) {
-								drum.updateVolume(false);
+                        boolean persistent = jf instanceof ProjectFrame frame && frame.isShowingAllNoteVelocities();
+                        noteGraph.setShowingNoteVelocity(persistent);
+                        if (dPanels != null) {
+                            for (DrumPanel drum : dPanels) {
+                                drum.updateVolume(persistent);
 							}
 						}
 					}

@@ -71,6 +71,8 @@ import com.digero.common.view.BarNumberLabel;
 import com.digero.common.view.ColorTable;
 import com.digero.common.view.SongPositionLabel;
 import com.digero.maestro.MaestroMain;
+import com.digero.maestro.shortcuts.ShortcutManager;
+import com.digero.maestro.shortcuts.BarNavigation;
 import com.digero.maestro.abc.AbcConversionException;
 import com.digero.maestro.abc.AbcExporter;
 import com.digero.maestro.abc.AbcPart;
@@ -114,6 +116,7 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
 	private static final TableLayout tableLayout = new TableLayout(LAYOUT_COLS, LAYOUT_ROWS);
 
 	private final Preferences prefs = Preferences.userNodeForPackage(MaestroMain.class);
+    private final ShortcutManager keyboardShortcuts = new ShortcutManager(prefs.node("keyboardShortcuts"));
 
 	private final int defaultStereo = 25;
 	private final int defaultVolume = MidiConstants.MAX_VOLUME;
@@ -143,6 +146,25 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
 	private JMenu openRecentMenu;
 	private JMenuItem saveMenuItem;
 	private JMenuItem saveAsMenuItem;
+    private JCheckBoxMenuItem noteEditModeMenuItem;
+    private JFrame noteEditorFrame;
+    private boolean noteEditorOpening;
+    private JToggleButton pianoRollModeRadioButton;
+    private JPanel rollModeHost;
+    private java.awt.CardLayout rollModeCards;
+    private com.digero.maestro.noteedit.NoteEditorApp.EditorTab midiRollEditor, abcRollEditor;
+    private boolean rollSourceAbc;
+    private boolean rollActive;
+    private AbcSong rollSong;
+    private long rollRefreshGeneration;
+    /** Coalesces rapid dragging into a single expensive live ABC preview rebuild. */
+    private final javax.swing.Timer rollLivePreviewTimer = new javax.swing.Timer(350,e -> {
+        if(abcSong!=null)refreshPreviewSequence(false);
+    });
+    /** Regenerate the editor's output ABC without waiting for a manual note edit.
+     *  Part/track changes are coalesced, but are independent of preview playback. */
+    private final javax.swing.Timer rollBaselineRefreshTimer = new javax.swing.Timer(110,e -> refreshGeneratedRollAsync());
+
 	private JMenuItem exportMenuItem;
 	private JMenuItem exportAsMenuItem;
 	private JMenuItem saveExpandedMidiMenuItem;
@@ -316,11 +338,17 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
 
 		// SongPartsListPanel
 		songPartsListPanel = new SongPartsListPanel(abcSequencer, miscSettings);
+        rollLivePreviewTimer.setRepeats(false);
+        rollBaselineRefreshTimer.setRepeats(false);
+        songPartsListPanel.setNoteEditorMuteSoloListener(this::syncRollMuteSolo);
 		songPartsListPanel.addListSelectionListener(e -> {
 			if (e.getValueIsAdjusting())
         		return;
 						
 			AbcPart abcPart = songPartsListPanel.getSelectedPart();
+            if (abcPart != null && abcRollEditor != null)
+                abcRollEditor.selectPartNumber(abcPart.getPartNumber());
+            applyRollPlaybackScope();
 
 			sequencer.getFilter().onAbcPartChanged(abcPart != null);
 			abcSequencer.getFilter().onAbcPartChanged(abcPart != null);
@@ -400,17 +428,9 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
         onSaveAndExportSettingsChanged();
         arrangementView.showInfoMessage(formatInfoMessage(welcomeMessageTitle, welcomeMessage, getHTMLFontSizeNormal()));
 		
-        // Add support for using spacebar for pause/play.
-        ActionListener spaceBarListener = e -> {
-            if (!sequencer.isLoaded()) {
-                return;
-            }
-            updateSequencer();
-            // Attempt to fix a bug where spacebar will later affect focused components
-            disableSpaceFocus();
-        };
-        this.getRootPane().registerKeyboardAction(spaceBarListener, KeyStroke.getKeyStroke(' '),
-                JComponent.WHEN_IN_FOCUSED_WINDOW);
+        // One shared dispatcher for the project and Maestro-owned dialogs.
+        // It consumes Space before focused controls or menus can activate.
+        keyboardShortcuts.install(this);
 
         /* Add a listener to remove focus from the current component when somewhere else is
          clicked.*/
@@ -738,6 +758,11 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
 		stopButton.setToolTipText(UIText.get("maestro.stop"));
 		stopButton.setMargin(playControlButtonMargin);
 		stopButton.addActionListener(e -> {
+            if(rollActive){
+                if(midiRollEditor!=null)midiRollEditor.stopPlayback();
+                if(abcRollEditor!=null)abcRollEditor.stopPlayback();
+                return;
+            }
 			abcSequencer.stop();
 			sequencer.stop();
 			abcSequencer.reset(false);
@@ -745,6 +770,11 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
 		});
 
 		ActionListener modeButtonListener = e -> {
+            if(rollActive){
+                stageRollEdits();
+                leavePianoRoll();
+            }
+            rollSourceAbc=abcModeRadioButton.isSelected();
 			updatePreviewMode(abcModeRadioButton.isSelected());
 			if (arrangementView != null) {
 				arrangementView.repaint();
@@ -762,6 +792,10 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
 		ButtonGroup modeButtonGroup = new ButtonGroup();
 		modeButtonGroup.add(abcModeRadioButton);
 		modeButtonGroup.add(midiModeRadioButton);
+        pianoRollModeRadioButton=new JRadioButton("Piano roll");
+        pianoRollModeRadioButton.setMargin(new Insets(1,5,1,5));
+        modeButtonGroup.add(pianoRollModeRadioButton);
+        pianoRollModeRadioButton.addActionListener(e -> enterPianoRoll());
 
 		midiModeRadioButton.setSelected(true);
 		abcPreviewMode = abcModeRadioButton.isSelected();
@@ -826,6 +860,7 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
 		
 		playControlPanel.add(hideEditsCheckbox);
 		playControlPanel.add(abcModeRadioButton);
+        playControlPanel.add(pianoRollModeRadioButton);
 		//play
 		//stop
 		playControlPanel.add(new JLabel(UIText.get("maestro.stereo")), "alignx right");
@@ -837,7 +872,11 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
 		playControlPanel.add(feedLabel, "span 8, center");
 
 		midiPartsAndControls = new JPanel(new BorderLayout(HGAP, VGAP));
-		midiPartsAndControls.add(arrangementView, BorderLayout.CENTER);
+        rollModeCards = new java.awt.CardLayout();
+        rollModeHost = new JPanel(rollModeCards);
+        rollModeHost.add(arrangementView,"arrangement");
+        rollModeHost.add(new JLabel("Loading piano roll...",SwingConstants.CENTER),"loading");
+		midiPartsAndControls.add(rollModeHost, BorderLayout.CENTER);
 		midiPartsAndControls.add(playControlPanel, BorderLayout.SOUTH);
 		midiPartsAndControls.setBorder(BorderFactory.createTitledBorder(UIText.get("maestro.part.settings")));
 	}
@@ -883,6 +922,9 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
 	 * Play/pause button (or spacebar)
 	 */
 	private void updateSequencer() {
+        // The embedded editor's TransportBridge delegates Play/Pause here.
+        // Always control Maestro's own sequencer directly: dispatching back to
+        // EditorTab.playOrPause() would recurse until StackOverflowError.
 		SequencerWrapper curSequencer = abcPreviewMode ? abcSequencer : sequencer;
 
 		boolean running = !curSequencer.isRunning();
@@ -976,18 +1018,10 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
 	}
 
 	private void disableSpaceFocus() {
-		InputMap im = (InputMap) UIManager.get("Button.focusInputMap");
-		if (im != null) {
-			im.put(KeyStroke.getKeyStroke("pressed SPACE"), "none");
-			im.put(KeyStroke.getKeyStroke("released SPACE"), "none");
-		}
-
-		im = (InputMap) UIManager.get("CheckBox.focusInputMap");
-		if (im != null) {
-			im.put(KeyStroke.getKeyStroke("pressed SPACE"), "none");
-			im.put(KeyStroke.getKeyStroke("released SPACE"), "none");
-		}
-	}
+        // A focused mode radio button otherwise intercepts pressed/released SPACE
+        // before the root pane's transport action can receive them.
+        com.digero.maestro.noteedit.SpaceKeyBindings.reserveSpaceForTransport();
+    }
 
 	private static void discardObject(IDiscardable object) {
 		if (object != null)
@@ -1015,14 +1049,30 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
         arrangementView.setStats("");
 		arrangementView.sidepanelVisible(false);
 
-		super.dispose();
-	}
+        keyboardShortcuts.close();
+        super.dispose();
+    }
 
 	private void initMenu() {
 		JMenuBar menuBar = new JMenuBar();
 		setJMenuBar(menuBar);
 
 		JMenu fileMenu = menuBar.add(new JMenu(UIText.get("maestro.menu.file")));
+        // Optional, modeless editing mode. Leave upstream conversion controls intact.
+        noteEditModeMenuItem = new JCheckBoxMenuItem("Piano roll editing mode");
+        noteEditModeMenuItem.addActionListener(e -> {
+            if (noteEditModeMenuItem.isSelected()) {
+                pianoRollModeRadioButton.setSelected(true);
+                enterPianoRoll();
+            }
+            else if(rollActive){
+                stageRollEdits();
+                leavePianoRoll();
+                if(rollSourceAbc)abcModeRadioButton.setSelected(true);
+                else midiModeRadioButton.setSelected(true);
+            }
+        });
+        fileMenu.add(noteEditModeMenuItem);
 		fileMenu.setMnemonic('F');
 
         openItem = fileMenu.add(new JMenuItem(UIText.get("maestro.menu.open.file")));
@@ -1098,6 +1148,20 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
 		exportAsMenuItem.setMnemonic('p');
 		exportAsMenuItem.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_E, CTRL_DOWN_MASK | SHIFT_DOWN_MASK));
 		exportAsMenuItem.addActionListener(e -> exportAbcAs());
+
+		fileMenu.addSeparator();
+        JMenuItem exportRollItem = fileMenu.add(new JMenuItem("Export Piano Roll As..."));
+        exportRollItem.addActionListener(e -> {
+            var editor = rollSourceAbc ? abcRollEditor : midiRollEditor;
+            if(rollActive && editor!=null) editor.exportAsFromMenu();
+            else JOptionPane.showMessageDialog(this,"Open Piano Roll mode first.");
+        });
+        JMenuItem saveRollItem = fileMenu.add(new JMenuItem("Store Piano Roll Edits in Project"));
+        saveRollItem.addActionListener(e -> {
+            if(abcSong==null)return;
+            try {stageRollEdits();setAbcSongModified(true);}
+            catch(RuntimeException ex){JOptionPane.showMessageDialog(this,ex.getMessage(),"Piano Roll",JOptionPane.ERROR_MESSAGE);}
+        });
 
 		fileMenu.addSeparator();
 
@@ -1232,7 +1296,137 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
 		aboutItem.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_F1, 0));
 		aboutItem.addActionListener(e -> AboutDialog.show(ProjectFrame.this, MaestroMain.APP_NAME,
 				MaestroMain.APP_VERSION, MaestroMain.WIKI_URL, "maestro_64.png"));
+        // Existing upstream menu accelerators and the new shortcuts share
+        // a preference-backed registry, so menu hints follow user remaps.
+        keyboardShortcuts.attachMenu("file.open", openItem);
+        keyboardShortcuts.attachMenu("file.save", saveMenuItem);
+        keyboardShortcuts.attachMenu("file.saveAs", saveAsMenuItem);
+        keyboardShortcuts.attachMenu("file.export", exportMenuItem);
+        keyboardShortcuts.attachMenu("file.exportAs", exportAsMenuItem);
+        keyboardShortcuts.attachMenu("file.reload", reloadMidiFileMenuItem);
+        keyboardShortcuts.attachMenu("file.exit", exitItem);
+        keyboardShortcuts.attachMenu("tools.options", settingsItem);
+        keyboardShortcuts.attachMenu("tools.help", helpItem);
+        keyboardShortcuts.attachMenu("tools.updates", versionItem);
+        keyboardShortcuts.attachMenu("tools.about", aboutItem);
+
+        JMenu transportMenu = menuBar.add(new JMenu("Playback / Navigate"));
+        attachShortcut(transportMenu, "transport.play", "Play / Pause (Space)", () -> {
+            if (sequencer.isLoaded()) updateSequencer();
+        });
+        attachShortcut(transportMenu, "transport.stop", "Stop", this::stopFromShortcut);
+        attachShortcut(transportMenu, "bar.start", "Beginning of song", this::seekSongStart);
+        attachShortcut(transportMenu, "bar.current", "Beginning of current bar", () -> seekBar(0));
+        attachShortcut(transportMenu, "bar.next", "Beginning of next bar", () -> seekBar(1));
+        attachShortcut(transportMenu, "bar.previous", "Beginning of previous bar", () -> seekBar(-1));
+        attachShortcut(transportMenu, "bar.forward1", "Forward 1 bar", () -> seekBar(1));
+        attachShortcut(transportMenu, "bar.back1", "Back 1 bar", () -> seekBar(-1));
+        attachShortcut(transportMenu, "bar.forward5", "Forward 5 bars", () -> seekBar(5));
+        attachShortcut(transportMenu, "bar.back5", "Back 5 bars", () -> seekBar(-5));
+        attachShortcut(transportMenu, "bar.forward10", "Forward 10 bars", () -> seekBar(10));
+        attachShortcut(transportMenu, "bar.back10", "Back 10 bars", () -> seekBar(-10));
+
+        JMenu windowsMenu = menuBar.add(new JMenu("Windows / Piano Roll"));
+        attachShortcut(windowsMenu, "window.section", "Toggle Section Editor", this::toggleSectionEditor);
+        attachShortcut(windowsMenu, "window.part", "Toggle Part Editor", () -> partEditor.setVisible(!partEditor.isVisible()));
+        attachShortcut(windowsMenu, "window.tune", "Toggle Tune Editor", () -> {
+            if (TuneEditor.isOpen()) TuneEditor.close();
+            else if (abcSong != null) TuneEditor.show(this, abcSong);
+        });
+        attachShortcut(windowsMenu, "window.theme", "Toggle Color Editor", () -> {
+            if (themeEditorDialog.isVisible()) themeEditorDialog.setVisible(false);
+            else showThemeEditor();
+        });
+        attachShortcut(windowsMenu, "window.volume", "Show/hide track note velocities", () -> {
+            arrangementView.setShowAllNoteVelocities(!arrangementView.isShowingAllNoteVelocities());
+        });
+        attachShortcut(windowsMenu, "window.roll", "Toggle Piano Roll", () -> noteEditModeMenuItem.doClick());
+
+        JMenu editMenu = menuBar.add(new JMenu("Piano Roll Edit"));
+        attachShortcut(editMenu, "editor.undo", "Undo", () -> {
+            var editor = rollSourceAbc ? abcRollEditor : midiRollEditor;
+            if (rollActive && editor != null) editor.undoFromShortcut();
+        });
+        attachShortcut(editMenu, "editor.redo", "Redo", () -> {
+            var editor = rollSourceAbc ? abcRollEditor : midiRollEditor;
+            if (rollActive && editor != null) editor.redoFromShortcut();
+        });
+        attachShortcut(editMenu, "editor.delete", "Delete selected notes", this::deleteRollSelection);
+        // Backspace is a separate remappable binding for the same command.
+        keyboardShortcuts.register("editor.deleteBackspace", this::deleteRollSelection);
+        attachShortcut(editMenu, "editor.clear", "Clear selection", () -> {
+            var editor = rollSourceAbc ? abcRollEditor : midiRollEditor;
+            if (rollActive && editor != null) editor.clearSelectionFromShortcut();
+        });
+
 	}
+
+    private void attachShortcut(JMenu menu, String id, String label, Runnable operation) {
+        JMenuItem item = menu.add(new JMenuItem(label));
+        item.addActionListener(e -> operation.run());
+        keyboardShortcuts.attachMenu(id, item);
+    }
+
+    public boolean isShowingAllNoteVelocities() {
+        return arrangementView.isShowingAllNoteVelocities();
+    }
+
+    private void deleteRollSelection() {
+        var editor = rollSourceAbc ? abcRollEditor : midiRollEditor;
+        if (rollActive && editor != null) editor.deleteFromShortcut();
+    }
+    private void seekSongStart() {
+        SequencerWrapper transport = abcPreviewMode ? abcSequencer : sequencer;
+        if (!transport.isLoaded()) return;
+        transport.setTickPosition(abcPreviewMode ? abcPreviewStartTick : 0L);
+        scheduleUiRefresh();
+    }
+    /** Move the active playhead while running, paused or stopped. */
+    private void seekBar(int offsetBars) {
+        if (abcSong == null) return;
+        SequencerWrapper transport = abcPreviewMode ? abcSequencer : sequencer;
+        javax.sound.midi.Sequence sequence = transport.getSequence();
+        if (sequence == null || !transport.isLoaded()) return;
+        long barTicks;
+        if (abcPreviewMode) {
+            var meter = abcSong.getTimeSignature();
+            barTicks = Math.max(1L, Math.round(4.0 * sequence.getResolution()
+                    * meter.numerator / meter.denominator));
+        } else {
+            barTicks = Math.max(1L, abcSong.getSequenceInfo().getDataCache().getBarLengthTicks());
+        }
+        long origin = abcPreviewMode ? abcPreviewStartTick : 0L;
+        long tick = BarNavigation.barStart(transport.getTickPosition(), origin,
+                barTicks, offsetBars, transport.getTickLength());
+        transport.setTickPosition(tick);
+        scheduleUiRefresh();
+    }
+
+    private void stopFromShortcut() {
+        SequencerWrapper transport = abcPreviewMode ? abcSequencer : sequencer;
+        if (!transport.isLoaded()) return;
+        transport.stop();
+        transport.reset(false);
+        scheduleUiRefresh();
+    }
+
+    /** Select the first enabled source track in the selected Song Part. */
+    private void toggleSectionEditor() {
+        if (SectionEditor.isOpen()) { SectionEditor.close(); return; }
+        AbcPart part = songPartsListPanel.getSelectedPart();
+        if (part == null) return;
+        for (int trackNumber : new java.util.TreeSet<>(arrangementView.trackPanels.keySet())) {
+            TrackPanel panel = arrangementView.trackPanels.get(trackNumber);
+            if (panel != null && part.isTrackEnabled(trackNumber)) {
+                panel.openSectionEditor();
+                return;
+            }
+        }
+        for (int trackNumber : new java.util.TreeSet<>(arrangementView.trackPanels.keySet())) {
+            TrackPanel panel = arrangementView.trackPanels.get(trackNumber);
+            if (panel != null) { panel.openSectionEditor(); return; }
+        }
+    }
 
 	private void initTheme() {
 		themeEditorDialog = new JDialog(this, "Color Editor", false); // false = non-modal
@@ -1314,7 +1508,7 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
 			showSettingsAgain = false;
 			SettingsDialog dialog = new SettingsDialog(ProjectFrame.this, prefs, partAutoNumberer, partNameTemplate,
 					exportFilenameTemplate, saveSettings.getCopy(), miscSettings.getCopy(),
-					instrNameSettings.getCopy());
+					instrNameSettings.getCopy(), keyboardShortcuts);
 			if (x > 0 && y > 0) {
 				dialog.setLocation(x, y);
 			}
@@ -1338,8 +1532,8 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
 
 				miscSettings.copyFrom(dialog.getMiscSettings());
 				miscSettings.saveToPrefs();
-				
-				onSaveAndExportSettingsChanged();
+                keyboardShortcuts.setBindings(dialog.getShortcutBindings());
+                onSaveAndExportSettingsChanged();
 			} else if (dialog.isSettingPageReset()) {
 				tab = dialog.getResetPageIndex();
 				switch (tab) {
@@ -1364,6 +1558,9 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
 					miscSettings.restoreDefaults();
 					if (sequencer != null) sequencer.reset(true);// To repopulate the devices
 					break;
+                case 6: // keyboard shortcuts
+                    keyboardShortcuts.setBindings(ShortcutManager.defaults());
+                    break;
 				}
 				showSettingsAgain = true;
 				x = dialog.getLocation().x;
@@ -2832,8 +3029,10 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
 			abcPositionLabel.setVisible(newAbcPreviewMode);
 			midiBarLabel.setVisible(!newAbcPreviewMode);
 			abcBarLabel.setVisible(newAbcPreviewMode);
-			midiModeRadioButton.setSelected(!newAbcPreviewMode);
-			abcModeRadioButton.setSelected(newAbcPreviewMode);
+            if(!rollActive){
+                midiModeRadioButton.setSelected(!newAbcPreviewMode);
+                abcModeRadioButton.setSelected(newAbcPreviewMode);
+            }
 
 			SequencerWrapper newSequencer = newAbcPreviewMode ? abcSequencer : sequencer;
 
@@ -3045,6 +3244,8 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
 
 			// Success: the abcSequencer now holds the build for this request id.
 			previewAppliedSeq = appliedRequestSeq;
+            requestRollBaselineRefresh();
+            applyRollPlaybackScope();
         } catch (InvalidMidiDataException e) {
             log.log(Level.WARNING, "Error after exporting preview", e);
             sequencer.stop();
@@ -3148,6 +3349,8 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
             AbcExporter exporter = abcSong.getAbcExporter();
             exporter.stereoPan = prefs.getInt("stereoPan", defaultStereo);
             SequenceInfo previewSequenceInfo = SequenceInfo.fromAbcParts(exporter, !failedToLoadLotroInstruments, false);
+            com.digero.maestro.abc.NoteEditorPreviewOverlay.apply(abcSong,previewSequenceInfo,
+                exporter,!failedToLoadLotroInstruments);
             applyPreview(previewSequenceInfo, exporter, requestSeq);
             setSourceChangeEnabled(true);
             return true;
@@ -3421,6 +3624,313 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
 		
 		return exportFile;
 	}
+
+
+    /** Convert between the editor's PPQ and the currently playing sequence's PPQ.
+     *  ABC preview has a possible start offset, which is not part of the ABC notes. */
+    private long rollTickToMaestro(boolean abc,long editorTick,int editorPpq){
+        SequencerWrapper transport=abc?abcSequencer:sequencer;
+        javax.sound.midi.Sequence seq=transport.getSequence();
+        if(seq==null || editorPpq<=0)return 0;
+        long offset=abc?abcPreviewStartTick:0;
+        return Math.max(0,offset+Math.round(editorTick*(double)seq.getResolution()/editorPpq));
+    }
+    private long maestroTickToRoll(boolean abc,int editorPpq){
+        SequencerWrapper transport=abc?abcSequencer:sequencer;
+        javax.sound.midi.Sequence seq=transport.getSequence();
+        if(seq==null)return 0;
+        long offset=abc?abcPreviewStartTick:0;
+        return Math.max(0,Math.round((transport.getTickPosition()-offset)*(double)editorPpq/seq.getResolution()));
+    }
+    private com.digero.maestro.noteedit.NoteEditorApp.TransportBridge makeRollTransport(boolean abc){
+        return new com.digero.maestro.noteedit.NoteEditorApp.TransportBridge(){
+            @Override public void playOrPause(){updateSequencer();}
+            @Override public void stop(){
+                (abc?abcSequencer:sequencer).stop();
+                (abc?abcSequencer:sequencer).reset(false);
+                scheduleUiRefresh();
+            }
+            @Override public void seek(long tick,int ppq){
+                SequencerWrapper transport=abc?abcSequencer:sequencer;
+                if(!transport.isLoaded())return;
+                transport.setTickPosition(Math.min(transport.getTickLength(),rollTickToMaestro(abc,tick,ppq)));
+                scheduleUiRefresh();
+            }
+            @Override public long position(int ppq){return maestroTickToRoll(abc,ppq);}
+            @Override public boolean isRunning(){return (abc?abcSequencer:sequencer).isRunning();}
+        };
+    }
+    private void requestRollBaselineRefresh(){
+        if(rollActive && abcRollEditor!=null && rollSong==abcSong && abcSong!=null)
+            rollBaselineRefreshTimer.restart();
+    }
+    /** Keep the Song Parts mute/solo state; current-part playback is an
+     *  additional temporary solo filter that is removed when leaving the roll. */
+    private void applyRollPlaybackScope(){
+        if(abcSong==null || abcSequencer==null || !abcSequencer.isLoaded())return;
+        boolean currentOnly=rollActive && rollSourceAbc && abcRollEditor!=null && !abcRollEditor.playsAllParts();
+        int activePart=currentOnly?abcRollEditor.currentPartNumber():-1;
+        for(AbcPart part:abcSong.getParts()){
+            int track=part.getPreviewSequenceTrackNumber();
+            if(track<0 || abcSequencer.getSequence()==null ||
+               track>=abcSequencer.getSequence().getTracks().length)continue;
+            abcSequencer.setTrackSolo(track,currentOnly?part.getPartNumber()==activePart:part.isSoloed());
+            abcSequencer.setTrackMute(track,part.isMuted());
+        }
+    }
+    /** Changes to Solo/Mute are playback filters, not deletions in the editable ABC. */
+    private void syncRollMuteSolo(){
+        if(abcRollEditor==null || abcSong==null)return;
+        for(AbcPart part:abcSong.getParts())
+            abcRollEditor.setPartMuteSolo(part.getPartNumber(),part.isMuted(),part.isSoloed());
+        applyRollPlaybackScope();
+    }
+    /** Refresh ONLY from Maestro's current final generated arrangement (never source tracks). */
+    private void refreshGeneratedRollAsync(){
+        if(!rollActive || abcRollEditor==null || rollSong!=abcSong || abcSong==null)return;
+        final AbcSong current=abcSong;
+        final long request=++rollRefreshGeneration;
+        final AbcSong snapshot=new AbcSong(current);
+        new SwingWorker<String,Void>(){
+            @Override protected String doInBackground() throws Exception {
+                Path f=Files.createTempFile("maestro-roll-generated-", ".abc");
+                try {
+                    snapshot.exportGeneratedAbc(f.toFile(),MaestroMain.APP_NAME);
+                    return Files.readString(f);
+                } finally {Files.deleteIfExists(f);}
+            }
+            @Override protected void done(){
+                if(request!=rollRefreshGeneration || abcSong!=current || abcRollEditor==null)return;
+                try {
+                    abcRollEditor.reloadGeneratedAbc(get(),current.getNoteEditorDeltas());
+                    AbcPart selected=songPartsListPanel.getSelectedPart();
+                    if(selected!=null)abcRollEditor.selectPartNumber(selected.getPartNumber());
+                    syncRollMuteSolo();
+                } catch(Exception ex){
+                    log.log(Level.WARNING,"Could not refresh piano roll from generated ABC",ex);
+                }
+            }
+        }.execute();
+    }
+
+    private void stageRollEdits(){
+        if(rollSong==null || abcSong!=rollSong)return;
+        if(midiRollEditor!=null)midiRollEditor.stageChanges();
+        if(abcRollEditor!=null)abcRollEditor.stageChanges();
+    }
+    private void leavePianoRoll(){
+        rollBaselineRefreshTimer.stop();
+        if(midiRollEditor!=null)midiRollEditor.suspendEmbeddedView();
+        if(abcRollEditor!=null)abcRollEditor.suspendEmbeddedView();
+        rollModeCards.show(rollModeHost,"arrangement");
+        rollActive=false;
+        applyRollPlaybackScope(); // Restore the Song Parts' own solo/mute settings
+        if(noteEditModeMenuItem!=null)noteEditModeMenuItem.setSelected(false);
+    }
+    private void enterPianoRoll(){
+        if(abcSong==null){pianoRollModeRadioButton.setSelected(false);return;}
+        rollActive=true;
+        rollSourceAbc=abcPreviewMode; // preserve Maestro transport position and running state
+        if(noteEditModeMenuItem!=null)noteEditModeMenuItem.setSelected(true);
+        // Only the current original/ABC preview context determines the document;
+        // we do not infer this from an unrelated file-chooser tab.
+        boolean desiredAbc=rollSourceAbc || abcSong.getSourceFile()==null ||
+            abcSong.getSourceFile().getName().toLowerCase(java.util.Locale.ROOT).endsWith(".abc");
+        if(desiredAbc && !abcPreviewMode){
+            // An ABC-source project has no editable raw-MIDI source layer here;
+            // use the generated preview's LOTRO transport and matching timebase.
+            rollSourceAbc=true;
+            updatePreviewMode(true,sequencer.isRunning());
+        }
+        com.digero.maestro.noteedit.NoteEditorApp.EditorTab existing=desiredAbc?abcRollEditor:midiRollEditor;
+        if(rollSong==abcSong && existing!=null){
+            if(desiredAbc){
+                AbcPart selectedPart=songPartsListPanel.getSelectedPart();
+                if(selectedPart!=null)existing.selectPartNumber(selectedPart.getPartNumber());
+                syncRollMuteSolo();
+            }
+            rollModeCards.show(rollModeHost,desiredAbc?"abcRoll":"midiRoll");
+            existing.fitView();
+            existing.resumeEmbeddedView();
+            applyRollPlaybackScope();
+            requestRollBaselineRefresh();
+            return;
+        }
+        if(noteEditorOpening)return;
+        noteEditorOpening=true;
+        rollModeCards.show(rollModeHost,"loading");
+        final AbcSong current=abcSong;
+        new SwingWorker<File[],Void>(){
+            @Override protected File[] doInBackground() throws Exception{
+                Path dir=Files.createTempDirectory("maestro-roll-");dir.toFile().deleteOnExit();
+                File source=current.getSourceFile();
+                byte[] stored=current.getNoteEditorMidi();
+                if(stored!=null){source=dir.resolve("source-edited.mid").toFile();
+                    Files.write(source.toPath(),stored);source.deleteOnExit();}
+                File abc=dir.resolve("arrangement.abc").toFile();abc.deleteOnExit();
+                String saved=current.getNoteEditorAbc();
+                if(saved!=null && current.getNoteEditorDeltas().isEmpty())
+                    Files.writeString(abc.toPath(),saved); // v1.3 snapshot fallback
+                else current.exportGeneratedAbc(abc,MaestroMain.APP_NAME);
+                return new File[]{source,abc};
+            }
+            @Override protected void done(){
+                noteEditorOpening=false;
+                if(abcSong!=current)return;
+                try{
+                    File[] files=get();
+                    if(rollSong!=current){
+                        if(midiRollEditor!=null){midiRollEditor.suspendEmbeddedView();rollModeHost.remove(midiRollEditor);}
+                        if(abcRollEditor!=null){abcRollEditor.suspendEmbeddedView();rollModeHost.remove(abcRollEditor);}
+                        midiRollEditor=null;abcRollEditor=null;rollSong=current;
+                    }
+                    com.digero.maestro.noteedit.NoteEditorApp.ProjectBridge bridge =
+                        new com.digero.maestro.noteedit.NoteEditorApp.ProjectBridge(){
+                            @Override public void save(com.digero.maestro.noteedit.NoteDocument.Kind kind,byte[] bytes)
+                                    throws Exception {
+                                if(abcSong!=current)throw new IOException("Project changed");
+                                if(kind==com.digero.maestro.noteedit.NoteDocument.Kind.ABC)
+                                    current.setNoteEditorAbc(new String(bytes,java.nio.charset.StandardCharsets.UTF_8));
+                                else current.setNoteEditorMidi(bytes);
+                                setAbcSongModified(true);
+                            }
+                            @Override public void changed(com.digero.maestro.noteedit.NoteDocument.Kind kind,
+                                    com.digero.maestro.noteedit.NoteDocument document){
+                                if(abcSong!=current)return;
+                                if(kind==com.digero.maestro.noteedit.NoteDocument.Kind.ABC){
+                                    current.setNoteEditorDeltas(com.digero.maestro.noteedit.NoteEditorDelta.capture(document));
+                                    rollLivePreviewTimer.restart();
+                                }
+                                setAbcSongModified(true);
+                            }
+                        };
+                    if(midiRollEditor==null && files[0]!=null && files[0].isFile() &&
+                        !files[0].getName().toLowerCase(java.util.Locale.ROOT).endsWith(".abc")){
+                        midiRollEditor=new com.digero.maestro.noteedit.NoteEditorApp.EditorTab(
+                            com.digero.maestro.noteedit.NoteDocument.Kind.MIDI,ProjectFrame.this,bridge);
+                        midiRollEditor.load(files[0]);
+                        midiRollEditor.useEmbeddedMode();
+                        midiRollEditor.setSharedTransport(makeRollTransport(false));
+                        midiRollEditor.setMasterAudioControls(ProjectFrame.this::getVolume,ProjectFrame.this::getPan);
+                        rollModeHost.add(midiRollEditor,"midiRoll");
+                    }
+                    if(abcRollEditor==null){
+                        abcRollEditor=new com.digero.maestro.noteedit.NoteEditorApp.EditorTab(
+                            com.digero.maestro.noteedit.NoteDocument.Kind.ABC,ProjectFrame.this,bridge);
+                        abcRollEditor.load(files[1]);
+                        abcRollEditor.useSongPartsSelection();
+                        abcRollEditor.setFollowSupplier(arrangementView::isFollowEnabled);
+                        abcRollEditor.setSharedTransport(makeRollTransport(true));
+                        abcRollEditor.setMasterAudioControls(ProjectFrame.this::getVolume,ProjectFrame.this::getPan);
+                        abcRollEditor.setOnScopeChanged(ProjectFrame.this::applyRollPlaybackScope);
+                        if(!current.getNoteEditorDeltas().isEmpty())
+                            abcRollEditor.reloadGeneratedAbc(Files.readString(files[1].toPath()),current.getNoteEditorDeltas());
+                        rollModeHost.add(abcRollEditor,"abcRoll");
+                    }
+                    if(midiRollEditor!=null)midiRollEditor.setFollowSupplier(arrangementView::isFollowEnabled);
+                    AbcPart selectedPart=songPartsListPanel.getSelectedPart();
+                    if(abcRollEditor!=null && selectedPart!=null)
+                        abcRollEditor.selectPartNumber(selectedPart.getPartNumber());
+                    syncRollMuteSolo();
+                    if(pianoRollModeRadioButton.isSelected())
+                        {rollModeCards.show(rollModeHost,desiredAbc?"abcRoll":
+                            (midiRollEditor==null?"abcRoll":"midiRoll"));
+                        com.digero.maestro.noteedit.NoteEditorApp.EditorTab chosen =
+                            desiredAbc || midiRollEditor==null ? abcRollEditor:midiRollEditor;
+                        chosen.fitView();chosen.resumeEmbeddedView();
+                        applyRollPlaybackScope();
+                        requestRollBaselineRefresh();}
+                }catch(Exception ex){
+                    pianoRollModeRadioButton.setSelected(false);
+                    leavePianoRoll();
+                    JOptionPane.showMessageDialog(ProjectFrame.this,"Piano roll: "+ex.getMessage(),
+                        "Note editor",JOptionPane.ERROR_MESSAGE);
+                }
+            }
+        }.execute();
+    }
+
+    /** Legacy modeless editor retained for upstream compatibility. */
+    private void openNoteEditor() {
+        if (noteEditorOpening) return;
+        if (noteEditorFrame != null && noteEditorFrame.isDisplayable()) {
+            noteEditorFrame.toFront();
+            noteEditorFrame.requestFocus();
+            return;
+        }
+        if (abcSong == null) {
+            registerNoteEditor(com.digero.maestro.noteedit.NoteEditorApp.openWindow());
+            return;
+        }
+        commitAllFields();
+        noteEditorOpening = true;
+        final AbcSong currentSong = abcSong;
+        final File sourceFile = currentSong.getSourceFile();
+        final File existingExport = currentSong.getExportFile();
+        setCursor(Cursor.getPredefinedCursor(Cursor.WAIT_CURSOR));
+        new SwingWorker<File[], Void>() {
+            @Override protected File[] doInBackground() throws Exception {
+                Path folder = Files.createTempDirectory("maestro-note-editor-");
+                folder.toFile().deleteOnExit();
+                File source = sourceFile;
+                byte[] embeddedMidi = currentSong.getNoteEditorMidi();
+                if (embeddedMidi != null) {
+                    source = folder.resolve("project-edited-source.mid").toFile();
+                    Files.write(source.toPath(), embeddedMidi);
+                    source.deleteOnExit();
+                }
+                File abc = folder.resolve("arrangement.abc").toFile();
+                abc.deleteOnExit();
+                String embeddedAbc = currentSong.getNoteEditorAbc();
+                if (embeddedAbc != null) {
+                    Files.writeString(abc.toPath(), embeddedAbc);
+                } else {
+                    currentSong.exportAbc(abc, MaestroMain.APP_NAME);
+                }
+                return new File[]{source, abc};
+            }
+            @Override protected void done() {
+                noteEditorOpening = false;
+                setCursor(Cursor.getDefaultCursor());
+                if (!isDisplayable() || abcSong != currentSong ||
+                        (noteEditModeMenuItem != null && !noteEditModeMenuItem.isSelected())) {
+                    if (noteEditModeMenuItem != null) noteEditModeMenuItem.setSelected(false);
+                    return;
+                }
+                try {
+                    File[] inputs = get();
+                    registerNoteEditor(com.digero.maestro.noteedit.NoteEditorApp.openWindow(inputs[0], inputs[1],
+                            (kind, bytes) -> {
+                                if (abcSong != currentSong)
+                                    throw new IOException("The project has changed. Reopen the editor for the new project.");
+                                if (kind == com.digero.maestro.noteedit.NoteDocument.Kind.ABC)
+                                    currentSong.setNoteEditorAbc(new String(bytes, java.nio.charset.StandardCharsets.UTF_8));
+                                else currentSong.setNoteEditorMidi(bytes);
+                                setAbcSongModified(true);
+                                if (!save()) throw new IOException("The MSX project could not be saved.");
+                            }));
+                } catch (Exception ex) {
+                    if (noteEditModeMenuItem != null) noteEditModeMenuItem.setSelected(false);
+                    File fallback = existingExport != null && existingExport.isFile() ? existingExport : null;
+                    JOptionPane.showMessageDialog(ProjectFrame.this,
+                        "Could not prepare the note editor arrangement snapshot.\n" + ex.getMessage() +
+                        "\nYou can still open the standalone editor from its JAR.",
+                        "Note editor", JOptionPane.WARNING_MESSAGE);
+                }
+            }
+        }.execute();
+    }
+
+    private void registerNoteEditor(JFrame editor) {
+        noteEditorFrame = editor;
+        if (noteEditModeMenuItem != null) noteEditModeMenuItem.setSelected(true);
+        editor.addWindowListener(new WindowAdapter() {
+            @Override public void windowClosed(WindowEvent e) {
+                if (noteEditorFrame == editor) noteEditorFrame = null;
+                if (noteEditModeMenuItem != null) noteEditModeMenuItem.setSelected(false);
+            }
+        });
+    }
 
 	private boolean exportAbcAs() {
 		songExportSettingsPanel.setExportSuccessfulLabelVisible(false);
@@ -3704,6 +4214,8 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
 	}
 
 	private boolean finishSave(boolean updateRecentlyOpenedFiles) {
+        try{stageRollEdits();}
+        catch(RuntimeException ex){JOptionPane.showMessageDialog(this,ex.getMessage(),"Piano roll save",JOptionPane.ERROR_MESSAGE);return false;}
 		commitAllFields();
 
 		try {

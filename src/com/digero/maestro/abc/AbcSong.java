@@ -54,6 +54,7 @@ import com.digero.maestro.midi.Chord.CalcDynamics;
 import com.digero.maestro.midi.SequenceDataCache;
 import com.digero.maestro.midi.SequenceInfo;
 import com.digero.maestro.midi.TrackInfo;
+import com.digero.maestro.noteedit.NoteEditorDelta;
 import com.digero.maestro.util.FileResolver;
 import com.digero.maestro.util.ListModelWrapper;
 import com.digero.maestro.util.SaveUtil;
@@ -122,6 +123,47 @@ public class AbcSong implements IDiscardable, AbcMetadataSource {
 	private QuantizedTimingInfo timingInfo;
 	private AbcExporter abcExporter;
 	private File sourceFile; // The MIDI or ABC file that this song was loaded from
+    // Optional fork-owned editor snapshots. Older Maestro ignores these fields.
+    private String noteEditorAbc = null;
+    /** Optional note differences against the current GENERATED output, keyed by X:/part number. */
+    private volatile Map<Integer, NoteEditorDelta.Part> noteEditorDeltas = Map.of();
+    /** v1.5.4 stored the written LOTRO note number rather than sounding pitch. */
+    private boolean noteEditorDeltasLegacyPitch;
+    public synchronized Map<Integer, NoteEditorDelta.Part> getNoteEditorDeltas() {
+        if (noteEditorDeltasLegacyPitch) {
+            Map<Integer, NoteEditorDelta.Part> upgraded = new LinkedHashMap<>();
+            for (var entry : noteEditorDeltas.entrySet()) {
+                int shift = 0;
+                for (AbcPart part : parts) if (part.getPartNumber() == entry.getKey()) {
+                    shift = part.getInstrument().octaveDelta * 12;
+                    break;
+                }
+                try {
+                    upgraded.put(entry.getKey(),NoteEditorDelta.shiftPitches(entry.getValue(),shift));
+                } catch (IllegalArgumentException outOfRange) {
+                    log.warning("Could not upgrade note editor pitch override for part " +
+                        entry.getKey() + ": " + outOfRange.getMessage());
+                    upgraded.put(entry.getKey(),entry.getValue());
+                }
+            }
+            noteEditorDeltas = Map.copyOf(upgraded);
+            noteEditorDeltasLegacyPitch = false;
+        }
+        return noteEditorDeltas;
+    }
+    public synchronized void setNoteEditorDeltas(Map<Integer,NoteEditorDelta.Part> deltas) {
+        this.noteEditorDeltas = Map.copyOf(deltas);
+        this.noteEditorDeltasLegacyPitch = false;
+    }
+    private String noteEditorMidiBase64 = null;
+    public String getNoteEditorAbc() { return noteEditorAbc; }
+    public byte[] getNoteEditorMidi() {
+        return noteEditorMidiBase64 == null ? null : java.util.Base64.getDecoder().decode(noteEditorMidiBase64);
+    }
+    public void setNoteEditorAbc(String text) { noteEditorAbc = text; }
+    public void setNoteEditorMidi(byte[] bytes) {
+        noteEditorMidiBase64 = bytes == null ? null : java.util.Base64.getEncoder().encodeToString(bytes);
+    }
 	private File newSourceFile = null;
 	private String sourceAbcText = null;
 	private Integer sourceAbcBPM = null;
@@ -541,6 +583,47 @@ public class AbcSong implements IDiscardable, AbcMetadataSource {
 					sourceAbcBPM = null;
 				}
 			}
+
+            // Optional note editor snapshots; normal Maestro import is unchanged.
+            Element editorElement = XmlUtil.selectSingleElement(songEle, "noteEditor");
+            if (editorElement != null) {
+                Element partSnapshot = XmlUtil.selectSingleElement(editorElement, "abc");
+                Element midiSnapshot = XmlUtil.selectSingleElement(editorElement, "midi");
+                if (partSnapshot != null) noteEditorAbc = partSnapshot.getTextContent();
+                Map<Integer, NoteEditorDelta.Part> deltas = new LinkedHashMap<>();
+                org.w3c.dom.NodeList deltaNodes = editorElement.getElementsByTagName("partDelta");
+                for(int k=0;k<deltaNodes.getLength();k++) {
+                    Element el = (Element)deltaNodes.item(k);
+                    try {
+                        int partNo = Integer.parseInt(el.getAttribute("number"));
+                        if(partNo < 1 || partNo > 10000) continue;
+                        List<NoteEditorDelta.Value> removed = new ArrayList<>(), added = new ArrayList<>();
+                        org.w3c.dom.NodeList changes = el.getChildNodes();
+                        for(int j=0;j<changes.getLength();j++) {
+                            if(!(changes.item(j) instanceof Element change)) continue;
+                            String name = change.getTagName();
+                            if(!name.equals("remove") && !name.equals("add")) continue;
+                            NoteEditorDelta.Value note = new NoteEditorDelta.Value(
+                                Integer.parseInt(change.getAttribute("pitch")),
+                                Integer.parseInt(change.getAttribute("velocity")),
+                                Long.parseLong(change.getAttribute("start")),
+                                Long.parseLong(change.getAttribute("end")));
+                            (name.equals("remove")?removed:added).add(note);
+                        }
+                        if(!removed.isEmpty() || !added.isEmpty())
+                            deltas.put(partNo,new NoteEditorDelta.Part(removed,added));
+                    } catch(RuntimeException malformed) {
+                        log.warning("Ignored invalid note editor delta in project file: " + malformed.getMessage());
+                    }
+                }
+                noteEditorDeltas = Map.copyOf(deltas);
+                noteEditorDeltasLegacyPitch = !"3".equals(editorElement.getAttribute("version"));
+                if (midiSnapshot != null) {
+                    String encoded = midiSnapshot.getTextContent().strip();
+                    if (encoded.length() <= 100_000_000 && encoded.matches("[A-Za-z0-9+/=\\s]*"))
+                        noteEditorMidiBase64 = encoded;
+                }
+            }
 
 			exportFile = SaveUtil.parseValue(songEle, "exportFile", exportFile);
 
@@ -1076,8 +1159,37 @@ public class AbcSong implements IDiscardable, AbcMetadataSource {
 			if (sourceAbcBPM != null) abcEle.setAttribute("bpm", Integer.toString(sourceAbcBPM));
 		}
 
-		return doc;
-	}
+        if (noteEditorAbc != null || noteEditorMidiBase64 != null || !noteEditorDeltas.isEmpty()) {
+            Element editor = (Element) songEle.appendChild(doc.createElement("noteEditor"));
+            editor.setAttribute("version", "3");
+            for(var entry : getNoteEditorDeltas().entrySet()) {
+                Element part = (Element)editor.appendChild(doc.createElement("partDelta"));
+                part.setAttribute("number",Integer.toString(entry.getKey()));
+                for(NoteEditorDelta.Value note : entry.getValue().removed())
+                    appendEditorDelta(doc,part,"remove",note);
+                for(NoteEditorDelta.Value note : entry.getValue().added())
+                    appendEditorDelta(doc,part,"add",note);
+            }
+            if (noteEditorAbc != null) {
+                Element abc = (Element) editor.appendChild(doc.createElement("abc"));
+                abc.appendChild(doc.createCDATASection(XmlUtil.sanitizeForCdata(noteEditorAbc)));
+            }
+            if (noteEditorMidiBase64 != null) {
+                Element midi = (Element) editor.appendChild(doc.createElement("midi"));
+                midi.setAttribute("encoding", "base64");
+                midi.setTextContent(noteEditorMidiBase64);
+            }
+        }
+        return doc;
+    }
+
+    private static void appendEditorDelta(Document doc,Element parent,String tag,NoteEditorDelta.Value note) {
+        Element node=(Element)parent.appendChild(doc.createElement(tag));
+        node.setAttribute("pitch",Integer.toString(note.pitch()));
+        node.setAttribute("velocity",Integer.toString(note.velocity()));
+        node.setAttribute("start",Long.toString(note.start()));
+        node.setAttribute("end",Long.toString(note.end()));
+    }
 
 	@SuppressWarnings("HardCodedStringLiteral")
 	private void appendExportSettings(Document doc, Element songEle) {
@@ -1144,7 +1256,15 @@ public class AbcSong implements IDiscardable, AbcMetadataSource {
 	 *
 	 * @return polyphony max if called by AutoExporter
 	 */
-	public int exportAbc(File exportFile, String appName) throws IOException, AbcConversionException {
+    public int exportAbc(File exportFile,String appName) throws IOException, AbcConversionException {
+        return exportAbcInternal(exportFile,appName,true);
+    }
+    /** Used only to refresh the piano roll's GENERATED baseline, before manual overrides. */
+    public int exportGeneratedAbc(File exportFile,String appName) throws IOException, AbcConversionException {
+        return exportAbcInternal(exportFile,appName,false);
+    }
+    private int exportAbcInternal(File exportFile,String appName,boolean includeEditorNotes)
+            throws IOException, AbcConversionException {
 		boolean delayEnabled = false;
 		int minDelay = 0;
 		for (AbcPart part : parts) {
@@ -1155,14 +1275,19 @@ public class AbcSong implements IDiscardable, AbcMetadataSource {
 				}
 			}
 		}
-		try (FileOutputStream out = new FileOutputStream(exportFile)) {
-			PolyphonyHistogram poly = getAbcExporter().exportToAbc(out, delayEnabled, appName, minDelay);
-			if (firstExportTime == null) firstExportTime = new Date();
-			if (appName.contains(AbcTools.APP_NAME)) {
-				poly.sumUp(this);
-				return poly.maxAll();
-			}
-		}
+        java.io.ByteArrayOutputStream generated = new java.io.ByteArrayOutputStream();
+        PolyphonyHistogram poly = getAbcExporter().exportToAbc(generated, delayEnabled, appName, minDelay);
+        if (includeEditorNotes && !noteEditorDeltas.isEmpty()) {
+            String combined = NoteEditorDelta.mergeAbc(generated.toString(StandardCharsets.UTF_8), noteEditorDeltas);
+            Files.writeString(exportFile.toPath(), combined, StandardCharsets.UTF_8);
+        } else {
+            Files.write(exportFile.toPath(), generated.toByteArray());
+        }
+        if (firstExportTime == null) firstExportTime = new Date();
+        if (appName.contains(AbcTools.APP_NAME)) {
+            poly.sumUp(this);
+            return poly.maxAll();
+        }
         setFileMetadata(exportFile.toPath(), appName);
 		return -1;
 	}
@@ -2254,6 +2379,10 @@ public class AbcSong implements IDiscardable, AbcMetadataSource {
         this.sequenceInfo = other.sequenceInfo;// lets assume the midi don't change while we work, then this is immutable
         this.timingInfo = other.timingInfo;// would be time-consuming to deep copy, plus it's kinda immutable
 		this.sourceAbcText = other.sourceAbcText;
+        this.noteEditorAbc = other.noteEditorAbc;
+        this.noteEditorDeltas = other.noteEditorDeltas;
+        this.noteEditorDeltasLegacyPitch = other.noteEditorDeltasLegacyPitch;
+        this.noteEditorMidiBase64 = other.noteEditorMidiBase64;
 		this.sourceAbcBPM = other.sourceAbcBPM;
 
         // settings classes

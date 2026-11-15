@@ -35,7 +35,8 @@ import javax.swing.*;
 
 public class AbcInfo implements AbcConstants, IBarNumberCache {
 
-    private static final String CORRUPT_ABC_WARNING_ID = UIText.get("common.possible.corrupt.abc");
+    // Do not call UIText.get during class initialization; tests and other clients may create AbcInfo first.
+    private static final String CORRUPT_ABC_WARNING_KEY = "common.possible.corrupt.abc";
 
 	public boolean hasTimingInfo() {
 		return hasTimingsInfo;
@@ -518,7 +519,7 @@ public class AbcInfo implements AbcConstants, IBarNumberCache {
                         String message = UIText.get("common.project.uses.0.abc.which.was.exported.with.a.flawed.maestro.1", title,issue);
 
                         WarningHandler.WarningAction action = warningHandler.handleWarning(
-                                CORRUPT_ABC_WARNING_ID, UIText.get("common.potential.corrupted.abc.from.0", abcCreator), message);
+                                UIText.get(CORRUPT_ABC_WARNING_KEY), UIText.get("common.potential.corrupted.abc.from.0", abcCreator), message);
 
                         if (action == WarningHandler.WarningAction.SKIP_FILE) {
                             throw new FileParseException(UIText.get("common.abctomidi.skipped.corrupt.file"), null);

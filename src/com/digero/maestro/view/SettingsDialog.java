@@ -34,6 +34,8 @@ import com.digero.common.util.Themer;
 import com.digero.common.util.Util;
 import com.digero.common.view.LinkButton;
 import com.digero.maestro.MaestroMain;
+import com.digero.maestro.shortcuts.ShortcutManager;
+import com.digero.maestro.shortcuts.ShortcutSettingsPanel;
 import com.digero.maestro.abc.*;
 
 import info.clearthought.layout.TableLayout;
@@ -56,6 +58,7 @@ public class SettingsDialog extends JDialog implements TableLayoutConstants {
 	private boolean numbererSettingsChanged = false;
 
 	private JTabbedPane tabPanel;
+    private final ShortcutSettingsPanel shortcutsPanel;
 
 	private final PartAutoNumberer.Settings partNumbererSettings;
 
@@ -83,7 +86,7 @@ public class SettingsDialog extends JDialog implements TableLayoutConstants {
 
     public SettingsDialog(JFrame owner, Preferences maestroPrefs, PartAutoNumberer partNumberer,
 			PartNameTemplate nameTemplate, ExportFilenameTemplate exportTemplate, SaveAndExportSettings saveSettings,
-			MiscSettings miscSettings, InstrNameSettings instrNameSettings) {
+			MiscSettings miscSettings, InstrNameSettings instrNameSettings, ShortcutManager shortcuts) {
 		super(owner, UIText.get("maestro.options.title"), true);
 		this.own = owner;
 		setDefaultCloseOperation(HIDE_ON_CLOSE);
@@ -101,6 +104,7 @@ public class SettingsDialog extends JDialog implements TableLayoutConstants {
 		this.instrNameSettings = instrNameSettings;
 		this.saveSettings = saveSettings;
 		this.miscSettings = miscSettings;
+        this.shortcutsPanel = new ShortcutSettingsPanel(shortcuts.snapshot());
 
 		JButton okButton = new JButton("OK");
 		getRootPane().setDefaultButton(okButton);
@@ -164,6 +168,7 @@ public class SettingsDialog extends JDialog implements TableLayoutConstants {
 		tabPanel.addTab(UIText.get("maestro.options.instrument.names"), createInstrNamePanel());
 		tabPanel.addTab(UIText.get("maestro.options.save.export"), createSaveAndExportSettingsPanel()); // SAVE_EXPORT_TAB
 		tabPanel.addTab(UIText.get("maestro.options.misc"), createMiscPanel()); // MISC_TAB
+        tabPanel.addTab("Keyboard shortcuts", shortcutsPanel);
 
 		JPanel mainPanel = new JPanel(new BorderLayout(PAD, PAD));
 		mainPanel.setBorder(BorderFactory.createEmptyBorder(PAD, PAD, PAD, PAD));
@@ -196,6 +201,8 @@ public class SettingsDialog extends JDialog implements TableLayoutConstants {
         }
         throw new UnsupportedOperationException("Not supported, use the other version.");
     }
+
+	public java.util.Map<String, KeyStroke> getShortcutBindings() { return shortcutsPanel.getBindings(); }
 
 	private JPanel createNumberingPanel() {
 		JLabel instrumentsTitle = new JLabel(UIText.get("maestro.options.html.b.u.first.part.number.u.b.html"));

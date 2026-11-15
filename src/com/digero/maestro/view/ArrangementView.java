@@ -49,6 +49,20 @@ import static javax.swing.ScrollPaneConstants.*;
  * Plus the user note/lyrics
  */
 public class ArrangementView extends JPanel implements ICompileConstants, TableLayoutConstants {
+    private JCheckBox followCheckBox;
+    /** Shares the same follow option with the embedded piano roll. */
+    public boolean isFollowEnabled() { return followCheckBox!=null && followCheckBox.isSelected(); }
+    private boolean showAllNoteVelocities;
+    public boolean isShowingAllNoteVelocities() { return showAllNoteVelocities; }
+    /** Same note-intensity visualization as Section Editor's Show Volume button,
+     *  applied to each source track of the selected Song Part. */
+    public void setShowAllNoteVelocities(boolean enabled) {
+        showAllNoteVelocities = enabled;
+        for (TrackPanel panel : trackPanels.values()) panel.setShowAllNoteVelocities(enabled);
+        repaint();
+    }
+
+
     protected static final Logger log = Logger.getLogger("view.ArrangementView");
 
 	private static final int HGAP = 4;
@@ -296,7 +310,7 @@ public class ArrangementView extends JPanel implements ICompileConstants, TableL
 //			System.out.println("vz: " + vZoom);
 		});
 		
-		JCheckBox followCheckBox = new JCheckBox(UIText.get("maestro.follow"));
+        followCheckBox = new JCheckBox(UIText.get("maestro.follow"));
 		followCheckBox.setHorizontalTextPosition(SwingConstants.LEFT);
 		followCheckBox.setFocusable(false);
 		followCheckBox.setToolTipText(UIText.get("maestro.tip.follow"));
@@ -911,6 +925,7 @@ public class ArrangementView extends JPanel implements ICompileConstants, TableL
 					}
 					TrackPanel trackPanel = trackPanels.get(trackNumber);
 					trackPanel.setAbcPart(abcPart);
+                    trackPanel.setShowAllNoteVelocities(showAllNoteVelocities);
 					trackPanel.setAbcPreviewMode(isAbcPreviewMode);
 					controlPanel.add(trackPanel,"x");
 					noteGraphPanel.add(trackPanel.getNoteGraph(),"x");

@@ -43,6 +43,10 @@ public class SongPartsListPanel extends JPanel implements IDiscardable, TableLay
 	protected MiscSettings miscSettings;
 
 	private final SequencerWrapper abcSequencer;
+    private Runnable noteEditorMuteSoloListener = ()->{};
+    public void setNoteEditorMuteSoloListener(Runnable listener) {
+        noteEditorMuteSoloListener = listener == null ? ()->{} : listener;
+    }
 
 	protected final Dimension rowDimension;
 	private int dropInsertIndex = -1;
@@ -281,6 +285,7 @@ public class SongPartsListPanel extends JPanel implements IDiscardable, TableLay
 			abcSequencer.setTrackMute(trackNo, part.isMuted());
 			abcSequencer.setTrackSolo(trackNo, part.isSoloed());
 		}
+        noteEditorMuteSoloListener.run();
 	}
 	
 	public List<Pair<Boolean, Boolean>> getSoloMuteStates() {
@@ -329,16 +334,16 @@ public class SongPartsListPanel extends JPanel implements IDiscardable, TableLay
 		case SELECTION:
 			selectPart(getIndexOfPart(part));
 			break;
-		case SOLO:
-		case MUTE:
-			updatePartSoloMute(part);
-			break;
-		case UNSOLO_ALL:
-			unsoloAll();
-			break;
-		case UNMUTE_ALL:
-			unmuteAll();
-			break;
+        case SOLO:
+        case MUTE:
+            updatePartSoloMute(part);
+            break;
+        case UNSOLO_ALL:
+            unsoloAll();noteEditorMuteSoloListener.run();
+            break;
+        case UNMUTE_ALL:
+            unmuteAll();noteEditorMuteSoloListener.run();
+            break;
 		default:
 			break;
 		}

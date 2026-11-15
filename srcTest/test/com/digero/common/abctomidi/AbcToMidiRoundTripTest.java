@@ -18,6 +18,7 @@ import javax.sound.midi.Sequence;
 import javax.sound.midi.ShortMessage;
 import javax.sound.midi.Track;
 
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -28,6 +29,11 @@ import org.junit.jupiter.api.Test;
  * the MIDI has them.
  */
 class AbcToMidiRoundTripTest {
+
+	@BeforeEach
+	void setUp() {
+		TestSetup.beforeEachTest();
+	}
 
 	private static final String DIR = "/com/digero/abctomidi/roundtrip/";
 

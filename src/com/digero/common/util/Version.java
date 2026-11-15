@@ -7,7 +7,15 @@ public class Version implements Comparable<Version> {
 		if (versionString == null)
 			return null;
 
-		String[] parts = versionString.trim().split("[\\._]");
+		String normalized = versionString.trim();
+        String suffix = null;
+        int dash = normalized.indexOf('-');
+        if (dash >= 0) {
+            suffix = normalized.substring(dash + 1).toUpperCase(java.util.Locale.ROOT);
+            if (!suffix.matches("[A-Za-z][A-Za-z0-9.-]*")) return null;
+            normalized = normalized.substring(0, dash);
+        }
+        String[] parts = normalized.split("[\\._]");
 		int major;
 		int minor = 0;
 		int revision = 0;
@@ -25,7 +33,7 @@ public class Version implements Comparable<Version> {
 			if (parts.length > 3)
 				build = Integer.parseInt(parts[3]);
 
-			return new Version(major, minor, revision, build);
+			return new Version(major, minor, revision, build, suffix);
 		} catch (NumberFormatException e) {
 			return null;
 		}
@@ -35,17 +43,23 @@ public class Version implements Comparable<Version> {
 	private final int minor;
 	private final int revision;
 	private final int build;
+    private final String suffix;
 
 	public Version(int major, int minor, int revision) {
 		this(major, minor, revision, -1);
 	}
 
 	public Version(int major, int minor, int revision, int build) {
-		this.major = major;
-		this.minor = minor;
-		this.revision = revision;
-		this.build = build;
-	}
+        this(major, minor, revision, build, null);
+    }
+
+    private Version(int major, int minor, int revision, int build, String suffix) {
+        this.major = major;
+        this.minor = minor;
+        this.revision = revision;
+        this.build = build;
+        this.suffix = suffix;
+    }
 
 	public int getMajor() {
 		return major;
@@ -79,7 +93,12 @@ public class Version implements Comparable<Version> {
 		if (this.revision != that.revision)
 			return Integer.compare(this.revision, that.revision);
 
-		return Integer.compare(this.build, that.build);
+		int buildOrder = Integer.compare(this.build, that.build);
+        if (buildOrder != 0) return buildOrder;
+        if (this.suffix == null && that.suffix == null) return 0;
+        if (this.suffix == null) return 1; // final release sorts after prerelease
+        if (that.suffix == null) return -1;
+        return this.suffix.compareToIgnoreCase(that.suffix);
 	}
 
 	@Override
@@ -90,12 +109,12 @@ public class Version implements Comparable<Version> {
 
 		Version that = (Version) obj;
 		return (this.major == that.major) && (this.minor == that.minor) && (this.revision == that.revision)
-				&& (this.build == that.build);
+				&& (this.build == that.build) && java.util.Objects.equals(this.suffix, that.suffix);
 	}
 
 	@Override
 	public int hashCode() {
-		return Integer.rotateLeft(major, 15) + Integer.rotateLeft(minor, 10) + Integer.rotateLeft(revision, 5) + build;
+		return Integer.rotateLeft(major, 15) + Integer.rotateLeft(minor, 10) + Integer.rotateLeft(revision, 5) + build + (suffix == null ? 0 : suffix.hashCode());
 	}
 
 	@Override
@@ -103,6 +122,7 @@ public class Version implements Comparable<Version> {
 		String s = major + "." + minor + "." + revision;
 		if (hasBuild())
 			s += "." + build;
+        if (suffix != null) s += "-" + suffix;
 		return s;
 	}
 }

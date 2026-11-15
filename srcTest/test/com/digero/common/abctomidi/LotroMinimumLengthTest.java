@@ -10,6 +10,7 @@ import java.util.Set;
 import java.util.stream.Stream;
 
 import com.digero.common.abc.AbcConstants;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
@@ -24,6 +25,11 @@ import com.digero.common.util.LotroFileParseException;
  * measurements.
  */
 class LotroMinimumLengthTest {
+
+	@BeforeEach
+	void setUp() {
+		TestSetup.beforeEachTest();
+	}
 
 	/**
 	 * @param refusedByLotro what LotRO did in game

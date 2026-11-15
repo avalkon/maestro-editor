@@ -102,6 +102,18 @@ public class TrackPanel extends JPanel implements IDiscardable, TableLayoutConst
 		public int rowHeight = ROW_HEIGHT_DEFAULT;
 	}
 
+    /** Reuse the exact Section Editor entry point as this track's button. */
+    public void openSectionEditor() { sectionButton.doClick(); }
+
+    private boolean showAllNoteVelocities;
+    public void setShowAllNoteVelocities(boolean enabled) {
+        showAllNoteVelocities = enabled;
+        noteGraph.setShowingNoteVelocity(enabled || trackVolumeBar.isDragging());
+        if (drumlinePanels != null) {
+            for (DrumPanel drum : drumlinePanels) drum.updateVolume(enabled);
+        }
+    }
+
 	private final TrackInfo trackInfo;
 	private final NoteFilterSequencerWrapper seq;
 	private final SequencerWrapper abcSequencer;
@@ -334,6 +346,8 @@ public class TrackPanel extends JPanel implements IDiscardable, TableLayoutConst
 			SectionEditor.show((JFrame) sectionButton.getTopLevelAncestor(), noteGraph, abcPart, track,
 					abcPart.getInstrument().isPercussion, drumlinePanels);// super hack! :(
 		});
+
+
 		
 		
 		LookAndFeel previousLF = UIManager.getLookAndFeel();
@@ -939,7 +953,7 @@ public class TrackPanel extends JPanel implements IDiscardable, TableLayoutConst
 		priorityBox.setVisible(trackEnabled && priorityEnabled);
 		priorityBox.setSelected(abcPart.isTrackPriority(trackInfo.getTrackNumber()));
 
-		noteGraph.setShowingNoteVelocity(trackVolumeBar.isDragging());
+		noteGraph.setShowingNoteVelocity(showAllNoteVelocities || trackVolumeBar.isDragging());
 
 		if (trackVolumeBar.isDragging()) {
 			noteGraph.setDeltaVolume(trackVolumeBar.getDeltaVolume());

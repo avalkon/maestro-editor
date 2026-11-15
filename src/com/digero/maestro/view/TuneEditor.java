@@ -36,6 +36,17 @@ public class TuneEditor {
 
 	private static Point lastLocation = null;
 	private static JDialog openDialog = null;
+
+	/** Returns whether the Tune Editor dialog is currently open. */
+	public static boolean isOpen() {
+		return openDialog != null;
+	}
+
+	/** Closes the dialog; its window listener handles normal cleanup. */
+	public static void close() {
+		if (openDialog != null)
+			openDialog.dispose();
+	}
     private static final MouseAdapter blocker = new MouseAdapter() {};
 	final static double[] LAYOUT_COLS_TABS = new double[] { 0.166, 0.166, 0.166, 0.166, 0.166, 0.17};
 	public static final int numberOfSectionsMax = 20;
@@ -83,16 +94,8 @@ public class TuneEditor {
 
 				abcSong.addSongListener(songListener);
 
-				// Add support for using spacebar for pause/play.
-				ActionListener spaceBarListener = ae -> {
-					// Not pretty but is what I got to work
-					// jf.getRootPane().dispatchEvent(ae);
-					ActionListener al = jf.getRootPane().getActionForKeyStroke(KeyStroke.getKeyStroke(' '));
-					if (al != null)
-						al.actionPerformed(ae);
-				};
-				this.getRootPane().registerKeyboardAction(spaceBarListener, KeyStroke.getKeyStroke(' '),
-						JComponent.WHEN_IN_FOCUSED_WINDOW);
+                // Space and remappable navigation shortcuts are owned by
+                // ProjectFrame's shared dispatcher, including this dialog.
 
 				TuneDialog.this.addWindowListener(new WindowAdapter() {
 
