@@ -2,13 +2,16 @@
 
 This fork written and maintained by Sinduriel of The Feral Housewives (Sting)
 
-This beta combines Maestro 4.7.6-derived source with the integrated piano-roll
-updates through editor v1.5.6 (instrument pitch and LOTRO timing fixes).
+For End Users:
 
-User-visible versions: **4.7.7-B1** in app titles/About/export metadata,
-Windows PE FileVersion/ProductVersion strings, and launcher configuration.
-The PE fixed numeric version is **4.7.7.1** because those numeric fields
-cannot contain `-B1`.
+See [latest releases](https://github.com/avalkon/maestro-editor/releases)  for downloads.
+
+This beta combines Maestro 4.7.6-derived source with the integrated piano-roll
+updates through editor v1.5.6(unreleased) (instrument pitch and LOTRO timing fixes).
+
+If you encounter any issues you can't figure out, please feel free to submit an 
+issue or contact me in-game, or find me through the official LotRO or Sting discords.
+
 
 ## Known beta caveats
 
