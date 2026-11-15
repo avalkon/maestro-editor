@@ -1,5 +1,7 @@
 # Maestro-Editor 4.7.7-B1 (Beta 1)
 
+This fork written and maintained by Sinduriel of The Feral Housewives (Sting)
+
 This beta combines Maestro 4.7.6-derived source with the integrated piano-roll
 updates through editor v1.5.6 (instrument pitch and LOTRO timing fixes).
 
