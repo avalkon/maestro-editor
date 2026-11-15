@@ -1,0 +1,435 @@
+package com.digero.maestro.noteedit;
+
+import javax.swing.*;
+import javax.swing.filechooser.FileNameExtensionFilter;
+import java.awt.*;
+import java.awt.event.WindowAdapter;
+import java.awt.event.WindowEvent;
+import java.io.File;
+import java.nio.charset.StandardCharsets;
+import java.util.Locale;
+
+/** Modeless editor. ProjectBridge is present only when launched from Maestro. */
+public final class NoteEditorApp {
+    private NoteEditorApp() {}
+    @FunctionalInterface public interface ProjectBridge {
+        /** Store the in-memory note layer in the .msx via Maestro's Save workflow. */
+        void save(NoteDocument.Kind kind, byte[] bytes) throws Exception;
+        /** Live change notification; standalone and older integrations can ignore it. */
+        default void changed(NoteDocument.Kind kind, NoteDocument document) {}
+    }
+    public static void main(String[] args) {
+        SwingUtilities.invokeLater(()->openWindow(args.length>0?new File(args[0]):null,
+                args.length>1?new File(args[1]):null));
+    }
+    public static JFrame openWindow(){return openWindow(null,null,null);}
+    public static JFrame openWindow(File sourceMidi,File exportedAbc){return openWindow(sourceMidi,exportedAbc,null);}
+    public static JFrame openWindow(File sourceMidi,File exportedAbc,ProjectBridge bridge){
+        JFrame frame=new JFrame("Maestro — Note Editing Mode");
+        frame.setDefaultCloseOperation(WindowConstants.DO_NOTHING_ON_CLOSE);
+        JTabbedPane tabs=new JTabbedPane();
+        EditorTab midi=new EditorTab(NoteDocument.Kind.MIDI,frame,bridge);
+        EditorTab abc=new EditorTab(NoteDocument.Kind.ABC,frame,bridge);
+        tabs.addTab("Original MIDI",midi);
+        tabs.addTab("LOTRO / ABC Parts",abc);
+        frame.setContentPane(tabs);
+        tabs.addChangeListener(e->{if(tabs.getSelectedComponent()==midi)abc.stopPlayback();else midi.stopPlayback();});
+        frame.addWindowListener(new WindowAdapter(){
+            @Override public void windowClosing(WindowEvent e){
+                if(midi.hasUnsaved()||abc.hasUnsaved()){
+                    int yes=JOptionPane.showConfirmDialog(frame,"There are unsaved editor changes. Discard them and close?",
+                            "Unsaved editor notes",JOptionPane.YES_NO_OPTION,JOptionPane.WARNING_MESSAGE);
+                    if(yes!=JOptionPane.YES_OPTION)return;
+                }
+                frame.dispose();
+            }
+            @Override public void windowClosed(WindowEvent e){midi.stopPlayback();abc.stopPlayback();}
+        });
+        frame.setSize(1160,770);frame.setLocationRelativeTo(null);frame.setVisible(true);
+        if(sourceMidi!=null&&is(sourceMidi,"mid","midi","kar"))midi.load(sourceMidi);
+        if(exportedAbc!=null&&is(exportedAbc,"abc")){
+            abc.load(exportedAbc);
+            if(sourceMidi!=null&&sourceMidi.getParentFile()!=null)
+                abc.setPreferredSaveDirectory(sourceMidi.getParentFile());
+        } else if(sourceMidi!=null&&is(sourceMidi,"abc"))abc.load(sourceMidi);
+        return frame;
+    }
+    private static boolean is(File file,String...suffixes){
+        if(!file.isFile())return false;
+        String ext=file.getName().toLowerCase(Locale.ROOT);
+        for(String s:suffixes)if(ext.endsWith("."+s))return true;
+        return false;
+    }
+    /** In embedded mode, Maestro owns transport position, playback, volume and panning.
+     *  EditorPlayback is retained only for the standalone window and note audition. */
+    public interface TransportBridge {
+        void playOrPause();
+        void stop();
+        void seek(long editorTick,int editorPpq);
+        long position(int editorPpq);
+        boolean isRunning();
+    }
+    public static final class EditorTab extends JPanel {
+        private final NoteDocument.Kind kind;
+        private final JFrame parent;
+        private final ProjectBridge bridge;
+        private final PianoRollPanel roll=new PianoRollPanel();
+        private final JComboBox<String> layers=new JComboBox<>();
+        private final JLabel layerLabel = new JLabel("Track / part: ");
+        private JButton openButton;
+        private JToolBar fileToolbar;
+        private TransportBridge sharedTransport;
+        private Runnable onScopeChanged=()->{};
+        private java.util.function.IntSupplier masterVolume=()->127, masterPan=()->64;
+        private java.util.function.BooleanSupplier followSupplier=()->false;
+        private final java.util.Map<Integer,boolean[]> partPlaybackState = new java.util.HashMap<>();
+        private boolean externalPartSelection;
+
+        private final JLabel status=new JLabel("Open a file to begin");
+        private final JScrollPane scroller=new JScrollPane(roll);
+        private final EditorPlayback player=new EditorPlayback();
+        private final javax.swing.Timer playbackTimer=new javax.swing.Timer(100,e->playbackTick());
+        private final JButton playButton=new JButton("Play");
+        private final JButton stopButton=new JButton("Stop");
+        private final JComboBox<String> scope=new JComboBox<>(new String[]{"Current part", "All parts"});
+        private final JCheckBox allParts=new JCheckBox("Display all parts");
+        private NoteDocument doc;
+        private File lastDirectory;
+        public EditorTab(NoteDocument.Kind kind,JFrame parent,ProjectBridge bridge){
+            super(new BorderLayout());this.kind=kind;this.parent=parent;this.bridge=bridge;
+            JPanel controls=new JPanel(new BorderLayout());
+            JToolBar files=new JToolBar();files.setFloatable(false);
+            fileToolbar=files;
+            openButton=button("Open...",this::chooseOpen);
+            JButton save=button("Export As...",this::saveAs);
+            files.add(openButton);files.add(save);
+            if(bridge!=null) {
+                JButton saveProject=button("Store edits in project",this::saveToProject);
+                saveProject.setToolTipText("Embed the edited MIDI/ABC snapshot in the active Maestro project");
+                files.add(saveProject);
+            }
+            files.addSeparator();files.add(layerLabel);files.add(layers);
+            controls.add(files,BorderLayout.SOUTH);
+            JToolBar editing=new JToolBar();editing.setFloatable(false);
+            // Compact, single-line toolbar. Maestro's File menu owns Export/Store
+            // in embedded mode, and the main transport owns Play and Stop.
+
+            editing.add(new JLabel("Snap: "));
+            JComboBox<String> snap=new JComboBox<>(new String[]{"1/1", "1/2", "1/3", "1/4", "1/6", "1/8", "1/12", "1/16", "1/32", "1/64"});
+            snap.setSelectedItem("1/16");
+            snap.addActionListener(e->{
+                String option=(String)snap.getSelectedItem();
+                if(option != null)roll.setSnapDivisor(Integer.parseInt(option.substring(2)));
+            });
+            snap.setMaximumSize(new Dimension(83,25));
+            roll.setSnapDivisor(16);editing.add(snap);
+            editing.addSeparator();
+            editing.add(new JLabel("Velocity: "));
+            JSpinner velocity = new JSpinner(new SpinnerNumberModel(90,1,127,1));
+            velocity.addChangeListener(e->{if(doc!=null){roll.setSelectedVelocity((Integer)velocity.getValue());}});
+            velocity.setMaximumSize(new Dimension(67,25));
+            editing.add(velocity);
+            editing.addSeparator();
+            editing.add(allParts);
+            editing.addSeparator();
+            editing.add(new JLabel("Play: "));
+            scope.setMaximumSize(new Dimension(123,25));
+            editing.add(scope);
+            scope.addActionListener(e->onScopeChanged.run());
+            editing.addSeparator();
+            editing.add(button("Undo",()->{if(doc!=null && doc.canUndo()){doc.undo();refreshed();notifyProjectChange();}}));
+            editing.add(button("Redo",()->{if(doc!=null && doc.canRedo()){doc.redo();refreshed();notifyProjectChange();}}));
+            editing.add(button("Delete",roll::removeSelected));
+            playButton.addActionListener(e->playOrPause());
+            stopButton.addActionListener(e->stopPlayback());stopButton.setEnabled(false);
+            if(bridge==null){
+                editing.addSeparator();editing.add(playButton);editing.add(stopButton);
+            }
+            controls.add(editing,BorderLayout.NORTH);
+            add(controls,BorderLayout.NORTH);
+            allParts.addActionListener(e->{roll.setShowAllParts(allParts.isSelected());});
+            layers.addActionListener(e->{if(doc!=null&&layers.getSelectedIndex()>=0){
+                stopLocalPlayback();roll.setDocument(doc,layers.getSelectedIndex());roll.fitFullPitchRange();
+                refreshed();
+            }});
+            layers.setRenderer(new DefaultListCellRenderer(){
+                @Override public Component getListCellRendererComponent(JList<?> list,Object value,int index,boolean selected,boolean focus){
+                    super.getListCellRendererComponent(list,value,index,selected,focus);
+                    if(doc!=null && index>=0 && index<doc.layers.size()){
+                        setText("●  "+value);
+                        if(!selected)setForeground(roll.getPartColor(index));
+                    }
+                    return this;
+                }
+            });
+            roll.setOnClipboardMessage(status::setText);
+            roll.setOnEdit(()->{
+                // Keep Maestro's shared transport/position during an embedded edit.
+                stopLocalPlayback();refreshed();
+                notifyProjectChange();
+            });
+            roll.setOnAudition((note, part)->{
+                boolean[] flags=partPlaybackState.get(part.partNumber);
+                boolean soloed=partPlaybackState.values().stream().anyMatch(a->a[1]);
+                if(flags!=null && (flags[0] || (soloed && !flags[1])))return;
+                long noteMillis=Math.round(2.0*(note.end()-note.start())*60_000.0/
+                    (Math.max(1,doc==null?960:doc.ppq)*Math.max(1,part.abcTempo)));
+                player.audition(note,part.lotroProgram,kind==NoteDocument.Kind.ABC,
+                    masterVolume.getAsInt(),masterPan.getAsInt(),
+                    (int)Math.min(1100,Math.max(350,noteMillis)),part.abcPitchShift);
+            });
+            roll.setOnSeek(()->{
+                if(sharedTransport!=null && doc!=null)sharedTransport.seek(roll.getPlayheadTick(),doc.ppq);
+                else if(player.isOpen())player.seek(roll.getPlayheadTick());
+            });
+            roll.setOnTogglePlayback(this::playOrPause);
+            scroller.setColumnHeaderView(roll.createStickyRuler());
+            scroller.setRowHeaderView(roll.createStickyKeyboard());
+            roll.setOnZoom(()->{
+                if(scroller.getColumnHeader()!=null){
+                    scroller.getColumnHeader().getView().revalidate();scroller.getColumnHeader().revalidate();
+                }
+                if(scroller.getRowHeader()!=null){
+                    scroller.getRowHeader().getView().revalidate();scroller.getRowHeader().revalidate();
+                    scroller.getRowHeader().repaint();
+                }
+            });
+            add(scroller,BorderLayout.CENTER);
+            JPanel bottom=new JPanel(new BorderLayout());
+            bottom.add(status,BorderLayout.CENTER);
+            bottom.add(new JLabel("Drag header = scrub  |  Ctrl+wheel = XY zoom  |  Box-select on empty grid  |  Shift = add  |  Space = play  "),BorderLayout.EAST);
+            add(bottom,BorderLayout.SOUTH);
+            if(kind==NoteDocument.Kind.ABC)status.setText("ABC supports organic L: denominators; edited notes are re-quantized to 960 PPQ.");
+        }
+        private void notifyProjectChange(){
+            if(bridge!=null && doc!=null)bridge.changed(kind,doc);
+        }
+        private JButton button(String text,Runnable action){JButton b=new JButton(text);b.addActionListener(e->action.run());return b;}
+        public void fitView(){SwingUtilities.invokeLater(()->{roll.fitFullPitchRange();
+            if(scroller.getRowHeader()!=null){scroller.getRowHeader().getView().revalidate();scroller.getRowHeader().repaint();}
+        });}
+        /** Used only by the embedded view; standalone retains its own player. */
+        public void setSharedTransport(TransportBridge bridge){
+            // The parent Maestro window handles Space globally. Do not also
+            // dispatch it from the focused piano roll (pressed vs typed events
+            // previously caused immediate play/pause oscillation).
+            roll.setSpaceShortcutEnabled(bridge==null);
+            this.sharedTransport=bridge;
+            if(bridge!=null){stopLocalPlayback();playbackTimer.start();playbackTick();}
+        }
+        public void setMasterAudioControls(java.util.function.IntSupplier volume,java.util.function.IntSupplier pan){
+            this.masterVolume=java.util.Objects.requireNonNull(volume);
+            this.masterPan=java.util.Objects.requireNonNull(pan);
+        }
+        public boolean hasSharedTransport(){return sharedTransport!=null;}
+        public boolean playsAllParts(){return scope.getSelectedIndex()==1;}
+        public void setOnScopeChanged(Runnable cb){onScopeChanged=java.util.Objects.requireNonNull(cb);}
+        /** Drop the in-window polling without changing Maestro's playing state. */
+        public void suspendEmbeddedView(){
+            if(sharedTransport!=null)playbackTimer.stop();else stopLocalPlayback();
+        }
+        public void resumeEmbeddedView(){
+            if(sharedTransport!=null){playbackTimer.start();playbackTick();}
+        }
+        public void undoFromShortcut() {
+            if (doc != null && doc.canUndo()) { doc.undo(); refreshed(); notifyProjectChange(); }
+        }
+        public void redoFromShortcut() {
+            if (doc != null && doc.canRedo()) { doc.redo(); refreshed(); notifyProjectChange(); }
+        }
+        public void deleteFromShortcut() { roll.removeSelected(); }
+        public void clearSelectionFromShortcut() { roll.clearSelection(); }
+        public void selectAllFromShortcut() { roll.selectAllVisibleNotes(); }
+        public void copyFromShortcut() { roll.copySelection(); }
+        public void cutFromShortcut() { roll.cutSelection(); }
+        public void pasteFromShortcut() { roll.pasteClipboard(); }
+        public void exportAsFromMenu(){saveAs();}
+        public void stageToProjectFromMenu(){stageChanges();}
+        public void useEmbeddedMode(){fileToolbar.setVisible(false);}
+
+        public boolean hasUnsaved(){return doc!=null&&doc.isDirty();}
+        public void useSongPartsSelection(){
+            if(kind==NoteDocument.Kind.ABC){
+                externalPartSelection=true;layerLabel.setVisible(false);layers.setVisible(false);
+                fileToolbar.setVisible(false); // File menu and Song Parts supply these controls
+            }
+        }
+        public void setFollowSupplier(java.util.function.BooleanSupplier supplier){
+            followSupplier=java.util.Objects.requireNonNull(supplier);
+        }
+        /** Select a resulting ABC part by its X: number, NOT a source MIDI track. */
+        public void selectPartNumber(int partNumber){
+            if(doc==null)return;
+            for(int i=0;i<doc.layers.size();i++)if(doc.layer(i).partNumber==partNumber){
+                if(layers.getSelectedIndex()!=i)layers.setSelectedIndex(i);
+                return;
+            }
+        }
+        public void setPartMuteSolo(int partNumber,boolean muted,boolean soloed){
+            partPlaybackState.put(partNumber,new boolean[]{muted,soloed});
+            roll.setPartMuteSolo(partNumber,muted,soloed);
+            applyPartPlaybackState();
+            roll.repaint();
+        }
+        private void applyPartPlaybackState(){
+            if(doc==null||kind!=NoteDocument.Kind.ABC)return;
+            int part=scope.getSelectedIndex()==1?-1:layers.getSelectedIndex();
+            player.setTrackMuteSolo(partPlaybackState,doc,part);
+        }
+        /** Load a freshly CONVERTED arrangement while rebasing the existing manual note deltas. */
+        public void reloadGeneratedAbc(String generated,java.util.Map<Integer,NoteEditorDelta.Part> deltas)
+                throws java.io.IOException {
+            if(kind!=NoteDocument.Kind.ABC)return;
+            int previous=-1;
+            if(doc!=null && layers.getSelectedIndex()>=0)previous=doc.layer(layers.getSelectedIndex()).partNumber;
+            NoteDocument updated=AbcDocumentIO.readText(generated);
+            // Rebuilding an identical generated baseline must NOT discard undo history.
+            // Maestro regenerates a preview after editor actions as well as after source changes.
+            if(sameBaseline(doc,updated))return;
+            NoteEditorDelta.Applied applied=NoteEditorDelta.apply(updated,deltas);
+            updated.markSaved();
+            stopLocalPlayback();
+            this.doc=updated;
+            layers.removeAllItems();
+            for(NoteDocument.Layer layer:doc.layers)layers.addItem(layer.name);
+            if(previous>0)selectPartNumber(previous);
+            if(layers.getSelectedIndex()<0 && layers.getItemCount()>0)layers.setSelectedIndex(0);
+            if(layers.getSelectedIndex()>=0)roll.setDocument(doc,layers.getSelectedIndex());
+            if(applied.unmatchedRemovals()>0)
+                status.setText("Note rebasing: "+applied.unmatchedRemovals()+" prior note(s) changed in the generated output; review overrides");
+            else refreshed();
+        }
+        private static boolean sameBaseline(NoteDocument current,NoteDocument generated){
+            if(current==null || current.layers.size()!=generated.layers.size())return false;
+            for(int i=0;i<current.layers.size();i++) {
+                NoteDocument.Layer a=current.layer(i), b=generated.layer(i);
+                if(a.partNumber!=b.partNumber || a.measureTicks!=b.measureTicks ||
+                   a.lotroProgram!=b.lotroProgram || a.abcTempo!=b.abcTempo ||
+                   !a.name.equals(b.name) || a.baselineNotes.size()!=b.baselineNotes.size())return false;
+                for(int j=0;j<a.baselineNotes.size();j++)
+                    if(!NoteEditorDelta.Value.of(a.baselineNotes.get(j)).equals(
+                        NoteEditorDelta.Value.of(b.baselineNotes.get(j))))return false;
+            }
+            return true;
+        }
+        public java.util.Map<Integer,NoteEditorDelta.Part> getNoteDeltas(){
+            return doc==null||kind!=NoteDocument.Kind.ABC?java.util.Map.of():NoteEditorDelta.capture(doc);
+        }
+        public int currentPartNumber(){
+            return doc==null||layers.getSelectedIndex()<0?-1:doc.layer(layers.getSelectedIndex()).partNumber;
+        }
+
+        private void setPreferredSaveDirectory(File dir){if(dir!=null&&dir.isDirectory())lastDirectory=dir;}
+        private void chooseOpen(){
+            if(hasUnsaved()&&JOptionPane.showConfirmDialog(parent,"Unsaved edits will be discarded. Continue?",
+                    "Unsaved edits",JOptionPane.OK_CANCEL_OPTION)!=JOptionPane.OK_OPTION)return;
+            JFileChooser chooser=new JFileChooser(lastDirectory);
+            if(kind==NoteDocument.Kind.MIDI)chooser.setFileFilter(new FileNameExtensionFilter("MIDI files","mid","midi","kar"));
+            else chooser.setFileFilter(new FileNameExtensionFilter("ABC scores","abc"));
+            if(chooser.showOpenDialog(parent)==JFileChooser.APPROVE_OPTION)load(chooser.getSelectedFile());
+        }
+        public void load(File file){
+            stopLocalPlayback();if(file==null||!file.isFile())return;
+            try{
+                NoteDocument incoming=kind==NoteDocument.Kind.MIDI?MidiDocumentIO.read(file):AbcDocumentIO.read(file);
+                if(incoming.layers.isEmpty())throw new IllegalArgumentException("File has no tracks/parts");
+                doc=incoming;layers.removeAllItems();
+                for(NoteDocument.Layer layer:doc.layers)layers.addItem(layer.name);
+                layers.setSelectedIndex(0);roll.setDocument(doc,0);roll.setPlayheadTick(0);
+                SwingUtilities.invokeLater(roll::fitFullPitchRange);
+                lastDirectory=file.getParentFile();refreshed();
+            }catch(Exception ex){JOptionPane.showMessageDialog(parent,ex.getMessage(),"Cannot open file",JOptionPane.ERROR_MESSAGE);}
+        }
+        private void saveAs(){
+            if(doc==null)return;
+            JFileChooser chooser=new JFileChooser(lastDirectory);
+            String name=doc.sourceFile.getName();int dot=name.lastIndexOf('.');if(dot>=0)name=name.substring(0,dot);
+            String ext=kind==NoteDocument.Kind.MIDI?"mid":"abc";
+            chooser.setSelectedFile(new File(lastDirectory,name+".edited."+ext));
+            if(chooser.showSaveDialog(parent)!=JFileChooser.APPROVE_OPTION)return;
+            File out=chooser.getSelectedFile();
+            if(!out.getName().toLowerCase(Locale.ROOT).endsWith("."+ext))out=new File(out+"."+ext);
+            if(out.equals(doc.sourceFile)){JOptionPane.showMessageDialog(parent,"Choose a different file.");return;}
+            if(out.exists()&&JOptionPane.showConfirmDialog(parent,"Overwrite "+out.getName()+"?","Overwrite",
+                    JOptionPane.YES_NO_OPTION)!=JOptionPane.YES_OPTION)return;
+            try{
+                if(kind==NoteDocument.Kind.MIDI)MidiDocumentIO.write(doc,out);else AbcDocumentIO.write(doc,out);
+                lastDirectory=out.getParentFile();doc.markSaved();refreshed();
+                JOptionPane.showMessageDialog(parent,"Exported " +out.getAbsolutePath());
+            }catch(Exception ex){JOptionPane.showMessageDialog(parent,ex.getMessage(),"Export failed",JOptionPane.ERROR_MESSAGE);}
+        }
+        public void saveToProject(){
+            if(doc==null||bridge==null)return;
+            try{
+                byte[] content=kind==NoteDocument.Kind.MIDI?MidiDocumentIO.toBytes(doc):
+                        AbcDocumentIO.toText(doc).getBytes(StandardCharsets.UTF_8);
+                bridge.save(kind,content);
+                bridge.changed(kind,doc);
+                doc.markSaved();refreshed();
+                JOptionPane.showMessageDialog(parent,"Staged the edited "+(kind==NoteDocument.Kind.MIDI?"MIDI":"ABC")+
+                        " snapshot in the Maestro project. Use Maestro File > Save to write .msx.\n"+
+                        "Edited ABC part deltas now feed Maestro's ABC export and live preview.\n"+
+                        "Original MIDI edits are still stored as a snapshot, not yet substituted into source conversion.");
+            }catch(Exception ex){JOptionPane.showMessageDialog(parent,ex.getMessage(),"MSX save failed",JOptionPane.ERROR_MESSAGE);}
+        }
+        public void playOrPause(){
+            if(doc==null)return;
+            if(sharedTransport!=null){sharedTransport.playOrPause();playbackTimer.start();playbackTick();return;}
+            if(player.isOpen()){
+                player.pauseOrResume();playButton.setText(player.isRunning()?"Pause":"Resume");return;
+            }
+            try{
+                int selected=scope.getSelectedIndex()==1?-1:layers.getSelectedIndex();
+                if(selected < -1||selected>=doc.layers.size())return;
+                player.play(EditorPlayback.sequenceFor(doc,selected),roll.getPlayheadTick(),kind==NoteDocument.Kind.ABC);
+                applyPartPlaybackState();
+                playButton.setText("Pause");stopButton.setEnabled(true);playbackTimer.start();playbackTick();
+            }catch(Exception ex){stopPlayback();JOptionPane.showMessageDialog(parent,
+                    "Could not start playback:\n"+ex.getMessage(),"Playback unavailable",JOptionPane.ERROR_MESSAGE);}
+        }
+        private void playbackTick(){
+            if(sharedTransport!=null){
+                if(doc==null)return;
+                roll.setPlayheadTick(sharedTransport.position(doc.ppq));
+            } else {
+                if(!player.isOpen()){playbackTimer.stop();return;}
+                roll.setPlayheadTick(player.position());
+            }
+            boolean running=sharedTransport!=null?sharedTransport.isRunning():player.isRunning();
+            if(running && followSupplier.getAsBoolean()){
+                int x=roll.playheadPixel(), left=scroller.getHorizontalScrollBar().getValue();
+                int width=scroller.getViewport().getWidth();
+                if(width>0 && (x>left+(int)(width*0.78) || x<left))
+                    scroller.getHorizontalScrollBar().setValue(Math.max(0,x-width/3));
+            }
+            if(sharedTransport==null){
+                if(!player.isRunning()&&player.position()>=player.tickLength()){stopPlayback();return;}
+                playButton.setText(player.isRunning()?"Pause":"Resume");
+            }
+        }
+        private void stopLocalPlayback(){
+            if(sharedTransport==null)playbackTimer.stop();
+            player.stop();playButton.setText("Play");stopButton.setEnabled(false);
+        }
+        public void stopPlayback(){
+            if(sharedTransport!=null){sharedTransport.stop();playbackTick();}
+            else {stopLocalPlayback();roll.setPlayheadTick(0);}
+        }
+        public void stageChanges(){
+            if(doc==null || !doc.isDirty() || bridge==null)return;
+            try{
+                byte[] data=kind==NoteDocument.Kind.MIDI?MidiDocumentIO.toBytes(doc):
+                    AbcDocumentIO.toText(doc).getBytes(StandardCharsets.UTF_8);
+                bridge.save(kind,data);bridge.changed(kind,doc);doc.markSaved();
+            }catch(Exception ex){throw new IllegalStateException("Unable to stage piano-roll notes",ex);}
+        }
+        private void refreshed(){
+            if(doc==null)return;
+            int index=Math.max(0,layers.getSelectedIndex());
+            status.setText("Detected key: "+roll.getDetectedKey()+" • "+(doc.isDirty()?"Modified • ":"")+doc.sourceFile.getName()+" • "+
+                    doc.layer(index).notes.size()+" notes • "+doc.layers.size()+" layers • "+roll.selectionSize()+" selected"+
+                    (bridge!=null?" • Save edits to MSX":" • Export As writes a separate file"));
+            roll.revalidate();roll.repaint();
+        }
+    }
+}
