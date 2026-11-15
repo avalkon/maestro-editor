@@ -1343,6 +1343,23 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
         attachShortcut(windowsMenu, "window.roll", "Toggle Piano Roll", () -> noteEditModeMenuItem.doClick());
 
         JMenu editMenu = menuBar.add(new JMenu("Piano Roll Edit"));
+        attachShortcut(editMenu, "editor.copy", "Copy", () -> {
+            var editor = rollSourceAbc ? abcRollEditor : midiRollEditor;
+            if (rollActive && editor != null) editor.copyFromShortcut();
+        });
+        attachShortcut(editMenu, "editor.cut", "Cut", () -> {
+            var editor = rollSourceAbc ? abcRollEditor : midiRollEditor;
+            if (rollActive && editor != null) editor.cutFromShortcut();
+        });
+        attachShortcut(editMenu, "editor.paste", "Paste at playhead", () -> {
+            var editor = rollSourceAbc ? abcRollEditor : midiRollEditor;
+            if (rollActive && editor != null) editor.pasteFromShortcut();
+        });
+        attachShortcut(editMenu, "editor.selectAll", "Select all visible notes", () -> {
+            var editor = rollSourceAbc ? abcRollEditor : midiRollEditor;
+            if (rollActive && editor != null) editor.selectAllFromShortcut();
+        });
+        editMenu.addSeparator();
         attachShortcut(editMenu, "editor.undo", "Undo", () -> {
             var editor = rollSourceAbc ? abcRollEditor : midiRollEditor;
             if (rollActive && editor != null) editor.undoFromShortcut();
