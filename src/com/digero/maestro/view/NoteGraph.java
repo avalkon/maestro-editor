@@ -405,6 +405,13 @@ public abstract class NoteGraph extends JPanel implements Listener<SequencerEven
 	}
 
 	private void repositionIndicator() {
+        // A pending resize may arrive after a project has unloaded its sequencer.
+        // Do not ask MidiUtils to convert a position on a null MIDI Sequence.
+        if (sequencer.getSequence() == null) {
+            indicatorLine.setVisible(false);
+            return;
+        }
+        indicatorLine.setVisible(true);
 		AffineTransform xform = getTransform();
 		Point2D.Double pt = new Point2D.Double(sequencer.getThumbPosition(), 0);
 		xform.transform(pt, pt);
@@ -871,7 +878,10 @@ public abstract class NoteGraph extends JPanel implements Listener<SequencerEven
 		if (w <= 0 || h <= 0) return false;
 
 		// Technically this calc should include histogram and tempo, but as a heuristic it's fine.
-		int graphCount = (sequenceInfo != null) ? Math.max(1, sequenceInfo.getTrackCount()) : 1;
+		// Preview-only SequenceInfo instances intentionally have no source TrackInfo list.
+        // Do not dereference that absent list while painting an authored preview lane.
+        int graphCount = (sequenceInfo != null && sequenceInfo.getTrackList() != null)
+                ? Math.max(1, sequenceInfo.getTrackCount()) : 1;
 		long maxPixels = TOTAL_BITMAP_BUDGET_PIXELS / graphCount;
 		if ((long) w * h > maxPixels) {
 			staticNotesImage = null;

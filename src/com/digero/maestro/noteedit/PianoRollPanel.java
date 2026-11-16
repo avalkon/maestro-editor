@@ -337,6 +337,12 @@ public final class PianoRollPanel extends JComponent {
     public void setOnSeek(Runnable cb){onSeek=cb;}
     public void setOnTogglePlayback(Runnable cb){onTogglePlayback=cb;}
     public void setDocument(NoteDocument doc,int index){document=doc;layerIndex=index;selected.clear();detectKey();revalidate();repaint();}
+    private int minimumMeasureCount;
+    /** New ABC compositions begin with a usable, empty timeline. */
+    public void setMinimumMeasureCount(int bars) {
+        minimumMeasureCount = Math.max(0,Math.min(2000,bars));
+        revalidate(); repaint();
+    }
     public void setShowAllParts(boolean enabled){showAllParts=enabled;selected.clear();detectKey();revalidate();repaint();}
     public boolean isShowingAllParts(){return showAllParts;}
     public void setPlayheadTick(long tick) {long normalized=Math.max(0,tick);if(playheadTick!=normalized){playheadTick=normalized;repaint();}}
@@ -370,6 +376,8 @@ public final class PianoRollPanel extends JComponent {
     public Color getPartColor(int layer){return document==null?Color.GRAY:colorFor(layer);}
     @Override public Dimension getPreferredSize(){
         long max=0;for(int i:visibleLayers())for(EditableNote n:document.layer(i).notes)max=Math.max(max,n.end());
+        if(document!=null && !document.layers.isEmpty())
+            max=Math.max(max,(long)minimumMeasureCount * document.measureTicks(layerIndex));
         double w=document==null?1:scale();
         return new Dimension((int)Math.min(200000,Math.max(1200,KEY_WIDTH+(max+(document==null?0:document.ppq*8L))*w)),TOP+128*rowHeight);
     }

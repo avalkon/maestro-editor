@@ -68,8 +68,14 @@ public final class NoteDocument {
     private void restore(State state) {
         for (int i = 0; i < layers.size(); i++) {
             Layer layer = layers.get(i);
-            layer.notes.clear(); layer.notes.addAll(state.notes.get(i));
-            layer.edited = state.edited.get(i);
+            layer.notes.clear();
+            if (i < state.notes.size()) {
+                layer.notes.addAll(state.notes.get(i));
+                layer.edited = state.edited.get(i);
+            } else {
+                // This X: part was added after the saved undo snapshot.
+                layer.edited = false;
+            }
         }
         dirty = true;
     }

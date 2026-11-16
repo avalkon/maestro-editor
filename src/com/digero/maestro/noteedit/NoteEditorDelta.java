@@ -52,6 +52,25 @@ public final class NoteEditorDelta {
         }
         return Collections.unmodifiableMap(changes);
     }
+    /** Preserve persisted changes for parts missing from an asynchronous editor
+     * baseline. Only layers actually present may replace/remove their deltas.
+     * This prevents a mode switch or delayed new-part refresh from wiping notes
+     * belonging to another X: part (including another part of the same instrument). */
+    public static Map<Integer,Part> capturePreservingMissing(NoteDocument doc,
+            Map<Integer,Part> previous) {
+        Map<Integer,Part> updated=new LinkedHashMap<>(previous);
+        Map<Integer,Part> current=capture(doc);
+        Set<Integer> seen=new HashSet<>();
+        for(NoteDocument.Layer layer:doc.layers) {
+            if(!seen.add(layer.partNumber))
+                throw new IllegalStateException("Duplicate ABC part X:"+layer.partNumber);
+            Part delta=current.get(layer.partNumber);
+            if(delta==null)updated.remove(layer.partNumber);
+            else updated.put(layer.partNumber,delta);
+        }
+        return Collections.unmodifiableMap(updated);
+    }
+
     private static Map<Value,Integer> count(List<EditableNote> notes) {
         Map<Value,Integer> counts=new LinkedHashMap<>();
         for(EditableNote note:notes)counts.merge(Value.of(note),1,Integer::sum);

@@ -53,12 +53,15 @@ public class ArrangementView extends JPanel implements ICompileConstants, TableL
     /** Shares the same follow option with the embedded piano roll. */
     public boolean isFollowEnabled() { return followCheckBox!=null && followCheckBox.isSelected(); }
     private boolean showAllNoteVelocities;
+    private final List<AuthoredTrackPanel> authoredTrackPanels = new ArrayList<>();
+    public boolean hasAuthoredPreviewRows() { return !authoredTrackPanels.isEmpty(); }
     public boolean isShowingAllNoteVelocities() { return showAllNoteVelocities; }
     /** Same note-intensity visualization as Section Editor's Show Volume button,
      *  applied to each source track of the selected Song Part. */
     public void setShowAllNoteVelocities(boolean enabled) {
         showAllNoteVelocities = enabled;
         for (TrackPanel panel : trackPanels.values()) panel.setShowAllNoteVelocities(enabled);
+        for (AuthoredTrackPanel panel : authoredTrackPanels) panel.setShowVelocities(enabled);
         repaint();
     }
 
@@ -794,7 +797,13 @@ public class ArrangementView extends JPanel implements ICompileConstants, TableL
 		numberSpinnerModel.setStepSize(partAutoNumberer.getIncrement());
 	}
 	
+    private void clearAuthoredTrackRows() {
+        for (AuthoredTrackPanel row : authoredTrackPanels) row.discard();
+        authoredTrackPanels.clear();
+    }
+
 	public void closeAbcSong() {
+        clearAuthoredTrackRows();
 		clearTrackListPanel(true);
 		if (histogramPanel != null) histogramPanel.discard();
 		histogramPanel = null;
@@ -811,6 +820,7 @@ public class ArrangementView extends JPanel implements ICompileConstants, TableL
 	 * Call this when any colors have changed
 	 */
 	public void rebuildPanels() {
+        clearAuthoredTrackRows();
 		AbcPart oldPart = abcPart;
 		PolyphonyHistogram oldHistogram = histogramPanel == null?null:histogramPanel.getHistogram();
 		DissonanceDetector oldDissonance = dissonancePanel == null?null:dissonancePanel.getDissonance();
@@ -833,6 +843,7 @@ public class ArrangementView extends JPanel implements ICompileConstants, TableL
 
 		if (this.abcPart == abcPart && initialized && !force)
 			return;
+        clearAuthoredTrackRows();
 
 		if (this.abcPart != null) {
 			try {
@@ -940,6 +951,30 @@ public class ArrangementView extends JPanel implements ICompileConstants, TableL
 				sequencer.setTrackSolo(trackNumber, false);
 			}
 			
+            // Present EVERY authored source track for EVERY selected Song Part,
+            // just as the imported-track checkboxes do. The selected part only
+            // controls this row's routing; it must not decide row visibility.
+            var song = abcPart.getAbcSong();
+            var routing = song.getAuthoredTrackRouting();
+            var sources = new java.util.TreeMap<>(song.getNoteEditorDeltas());
+            for (var source : sources.entrySet()) {
+                if (source.getValue().added().isEmpty()) continue;
+                int sourceNumber = source.getKey();
+                AbcPart origin = null;
+                for (AbcPart candidate : song.getParts())
+                    if (candidate.getPartNumber() == sourceNumber) { origin = candidate; break; }
+                var destinations = com.digero.maestro.noteedit.AuthoredTrackRouting
+                    .targets(sourceNumber, routing);
+                AuthoredTrackPanel row = new AuthoredTrackPanel(sourceNumber, origin,
+                    abcPart, source.getValue().added(), destinations, abcSequencer,
+                    showAllNoteVelocities, (target, enabled) ->
+                        projectFrame.setAuthoredTrackRouted(sourceNumber, target, enabled));
+                row.setAbcPreviewMode(isAbcPreviewMode);
+                authoredTrackPanels.add(row);
+                controlPanel.add(row,"x");
+                noteGraphPanel.add(row.getNoteGraph(),"x");
+            }
+
 			// add dummy space at the end to fix scroll bar calcuation swing bug
 			
 			int scrollbarHeight = new JScrollPane().getHorizontalScrollBar().getPreferredSize().height;
@@ -1003,6 +1038,9 @@ public class ArrangementView extends JPanel implements ICompileConstants, TableL
 	}
 
 	public void setAbcPreviewMode(boolean isAbcPreviewMode) {
+        for (AuthoredTrackPanel row:authoredTrackPanels)
+            row.setAbcPreviewMode(isAbcPreviewMode);
+        controlPanel.revalidate(); noteGraphPanel.revalidate();
 		//if (this.isAbcPreviewMode != isAbcPreviewMode) {
 			this.isAbcPreviewMode = isAbcPreviewMode;
 			for (Component child : controlPanel.getComponents()) {

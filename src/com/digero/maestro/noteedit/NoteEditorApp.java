@@ -84,6 +84,7 @@ public final class NoteEditorApp {
         private java.util.function.BooleanSupplier followSupplier=()->false;
         private final java.util.Map<Integer,boolean[]> partPlaybackState = new java.util.HashMap<>();
         private boolean externalPartSelection;
+        private boolean embeddedMode;
 
         private final JLabel status=new JLabel("Open a file to begin");
         private final JScrollPane scroller=new JScrollPane(roll);
@@ -205,6 +206,7 @@ public final class NoteEditorApp {
             if(bridge!=null && doc!=null)bridge.changed(kind,doc);
         }
         private JButton button(String text,Runnable action){JButton b=new JButton(text);b.addActionListener(e->action.run());return b;}
+        public void setMinimumMeasures(int count){roll.setMinimumMeasureCount(count);}
         public void fitView(){SwingUtilities.invokeLater(()->{roll.fitFullPitchRange();
             if(scroller.getRowHeader()!=null){scroller.getRowHeader().getView().revalidate();scroller.getRowHeader().repaint();}
         });}
@@ -245,7 +247,7 @@ public final class NoteEditorApp {
         public void pasteFromShortcut() { roll.pasteClipboard(); }
         public void exportAsFromMenu(){saveAs();}
         public void stageToProjectFromMenu(){stageChanges();}
-        public void useEmbeddedMode(){fileToolbar.setVisible(false);}
+        public void useEmbeddedMode(){embeddedMode=true;fileToolbar.setVisible(false);}
 
         public boolean hasUnsaved(){return doc!=null&&doc.isDirty();}
         public void useSongPartsSelection(){
@@ -257,6 +259,14 @@ public final class NoteEditorApp {
         public void setFollowSupplier(java.util.function.BooleanSupplier supplier){
             followSupplier=java.util.Objects.requireNonNull(supplier);
         }
+        /** JComboBox matches String items by equals(), not index. Two parts may
+         * have IDENTICAL names/instruments, so each ABC item must contain its
+         * unique X: number or selecting the second part silently picks the first. */
+        private String layerDisplayName(NoteDocument.Layer layer) {
+            return kind==NoteDocument.Kind.ABC
+                ? "X:"+layer.partNumber+"  "+layer.name : layer.name;
+        }
+
         /** Select a resulting ABC part by its X: number, NOT a source MIDI track. */
         public void selectPartNumber(int partNumber){
             if(doc==null)return;
@@ -265,6 +275,37 @@ public final class NoteEditorApp {
                 return;
             }
         }
+        /** A new Song Part can be selected before the async ABC baseline rebuild.
+         * Insert its empty X:-identified layer immediately; never keep editing
+         * the previously selected instrument just because this part is missing. */
+        public void ensureAbcPart(CompositionAbc.PartSpec spec,
+                java.util.Map<Integer,NoteEditorDelta.Part> persistedDeltas) {
+            if (kind!=NoteDocument.Kind.ABC || doc==null) return;
+            for (NoteDocument.Layer layer:doc.layers)
+                if (layer.partNumber==spec.number()) {
+                    selectPartNumber(spec.number());
+                    return;
+                }
+            try {
+                NoteDocument empty=AbcDocumentIO.readText(
+                    CompositionAbc.forEditor("%abc-2.1\n", java.util.List.of(spec)));
+                if (empty.layers.size()!=1 || empty.layer(0).partNumber!=spec.number())
+                    throw new java.io.IOException("Cannot create part X:"+spec.number());
+                NoteEditorDelta.apply(empty,persistedDeltas);
+                doc.layers.add(empty.layer(0));
+                layers.addItem(layerDisplayName(empty.layer(0)));
+                selectPartNumber(spec.number());
+            } catch (java.io.IOException failed) {
+                throw new IllegalStateException("Cannot select new part X:"+spec.number(),failed);
+            }
+        }
+
+        public java.util.Map<Integer,NoteEditorDelta.Part> getNoteDeltasPreserving(
+                java.util.Map<Integer,NoteEditorDelta.Part> persisted) {
+            return doc==null || kind!=NoteDocument.Kind.ABC ? persisted :
+                NoteEditorDelta.capturePreservingMissing(doc,persisted);
+        }
+
         public void setPartMuteSolo(int partNumber,boolean muted,boolean soloed){
             partPlaybackState.put(partNumber,new boolean[]{muted,soloed});
             roll.setPartMuteSolo(partNumber,muted,soloed);
@@ -285,13 +326,17 @@ public final class NoteEditorApp {
             NoteDocument updated=AbcDocumentIO.readText(generated);
             // Rebuilding an identical generated baseline must NOT discard undo history.
             // Maestro regenerates a preview after editor actions as well as after source changes.
-            if(sameBaseline(doc,updated))return;
+            // A regenerated baseline can be identical while the MSX's note
+            // overrides have changed (for example after reopening, rerouting,
+            // or editing a second part). Compare final deltas as well: skipping
+            // solely because the baseline matches leaves a stale/blank editor.
+            if(sameBaseline(doc,updated) && NoteEditorDelta.capture(doc).equals(deltas))return;
             NoteEditorDelta.Applied applied=NoteEditorDelta.apply(updated,deltas);
             updated.markSaved();
             stopLocalPlayback();
             this.doc=updated;
             layers.removeAllItems();
-            for(NoteDocument.Layer layer:doc.layers)layers.addItem(layer.name);
+            for(NoteDocument.Layer layer:doc.layers)layers.addItem(layerDisplayName(layer));
             if(previous>0)selectPartNumber(previous);
             if(layers.getSelectedIndex()<0 && layers.getItemCount()>0)layers.setSelectedIndex(0);
             if(layers.getSelectedIndex()>=0)roll.setDocument(doc,layers.getSelectedIndex());
@@ -334,7 +379,7 @@ public final class NoteEditorApp {
                 NoteDocument incoming=kind==NoteDocument.Kind.MIDI?MidiDocumentIO.read(file):AbcDocumentIO.read(file);
                 if(incoming.layers.isEmpty())throw new IllegalArgumentException("File has no tracks/parts");
                 doc=incoming;layers.removeAllItems();
-                for(NoteDocument.Layer layer:doc.layers)layers.addItem(layer.name);
+                for(NoteDocument.Layer layer:doc.layers)layers.addItem(layerDisplayName(layer));
                 layers.setSelectedIndex(0);roll.setDocument(doc,0);roll.setPlayheadTick(0);
                 SwingUtilities.invokeLater(roll::fitFullPitchRange);
                 lastDirectory=file.getParentFile();refreshed();
@@ -361,10 +406,17 @@ public final class NoteEditorApp {
         public void saveToProject(){
             if(doc==null||bridge==null)return;
             try{
-                byte[] content=kind==NoteDocument.Kind.MIDI?MidiDocumentIO.toBytes(doc):
-                        AbcDocumentIO.toText(doc).getBytes(StandardCharsets.UTF_8);
-                bridge.save(kind,content);
-                bridge.changed(kind,doc);
+                if (embeddedMode && kind == NoteDocument.Kind.ABC) {
+                    // Project persistence is lossless: keep EVERY note (including
+                    // out-of-range notes) in the MSX deltas. Only ABC EXPORT
+                    // checks LOTRO's instrument range. No ABC serialization here.
+                    bridge.changed(kind,doc);
+                } else {
+                    byte[] content=kind==NoteDocument.Kind.MIDI?MidiDocumentIO.toBytes(doc):
+                            AbcDocumentIO.toText(doc).getBytes(StandardCharsets.UTF_8);
+                    bridge.save(kind,content);
+                    bridge.changed(kind,doc);
+                }
                 doc.markSaved();refreshed();
                 JOptionPane.showMessageDialog(parent,"Staged the edited "+(kind==NoteDocument.Kind.MIDI?"MIDI":"ABC")+
                         " snapshot in the Maestro project. Use Maestro File > Save to write .msx.\n"+
@@ -418,9 +470,17 @@ public final class NoteEditorApp {
         public void stageChanges(){
             if(doc==null || !doc.isDirty() || bridge==null)return;
             try{
-                byte[] data=kind==NoteDocument.Kind.MIDI?MidiDocumentIO.toBytes(doc):
-                    AbcDocumentIO.toText(doc).getBytes(StandardCharsets.UTF_8);
-                bridge.save(kind,data);bridge.changed(kind,doc);doc.markSaved();
+                if (embeddedMode && kind == NoteDocument.Kind.ABC) {
+                    // Saving MSX must never fail because of an unplayable pitch.
+                    // The lossless delta layer is the authority for embedded ABC.
+                    bridge.changed(kind,doc);
+                } else {
+                    byte[] data=kind==NoteDocument.Kind.MIDI?MidiDocumentIO.toBytes(doc):
+                        AbcDocumentIO.toText(doc).getBytes(StandardCharsets.UTF_8);
+                    bridge.save(kind,data);
+                    bridge.changed(kind,doc);
+                }
+                doc.markSaved();
             }catch(Exception ex){throw new IllegalStateException("Unable to stage piano-roll notes",ex);}
         }
         private void refreshed(){

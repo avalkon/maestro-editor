@@ -93,6 +93,25 @@ public class AbcPart implements AbcPartMetadataSource, NumberedAbcPart, IDiscard
 	private final AbcSong abcSong;
 	private int enabledTrackCount = 0;
 	private int previewSequenceTrackNumber = -1;
+    // Extra preview tracks for routed, manually authored notes. Runtime-only:
+    // they are rebuilt with each preview and are not imported source tracks.
+    private final List<com.digero.maestro.abc.AuthoredPreviewTrackInfo> authoredPreviewTracks = new ArrayList<>();
+    public void clearAuthoredPreviewTracks() { authoredPreviewTracks.clear(); }
+    public void addAuthoredPreviewTrack(com.digero.maestro.abc.AuthoredPreviewTrackInfo info) {
+        authoredPreviewTracks.add(info);
+    }
+    public List<com.digero.maestro.abc.AuthoredPreviewTrackInfo> getAuthoredPreviewTracks() {
+        return Collections.unmodifiableList(authoredPreviewTracks);
+    }
+    public List<Integer> getAllPreviewTrackNumbers() {
+        List<Integer> numbers = new ArrayList<>();
+        if (previewSequenceTrackNumber >= 0) numbers.add(previewSequenceTrackNumber);
+        for (var track : authoredPreviewTracks) {
+            if (!numbers.contains(track.trackNumber)) numbers.add(track.trackNumber);
+        }
+        return numbers;
+    }
+
 	private final ListenerList<AbcPartEvent> listeners;
 
 

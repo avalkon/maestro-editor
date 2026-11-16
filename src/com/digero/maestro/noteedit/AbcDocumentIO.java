@@ -66,6 +66,10 @@ public final class AbcDocumentIO {
             layer.measureTicks = measureTicks(field(header, "M", "4/4"));
             try { layer.partNumber = Integer.parseInt(field(header,"X",String.valueOf(i+1))); }
             catch (NumberFormatException ex) { layer.partNumber = i+1; }
+            for (NoteDocument.Layer prior : doc.layers)
+                if (prior.partNumber == layer.partNumber)
+                    throw new IOException("Duplicate ABC part X:" + layer.partNumber +
+                        "; note edits require unique part numbers");
             if (i == 0) doc.measureTicks = layer.measureTicks;
             try { parseBody(body, base, signature, layer.abcPitchShift, layer.notes); }
             catch (IOException ex) { throw new IOException("ABC part " + (i+1) + " ("+title+"): " + ex.getMessage(), ex); }
@@ -292,11 +296,25 @@ public final class AbcDocumentIO {
                 header=header.replaceFirst("(?m)^L:.*$","L: 1/" + abcUnitDenominator);
             else
                 header=header.replaceFirst("(?m)^K:","L: 1/" + abcUnitDenominator + "\nK:");
-            header=header.replaceFirst("(?m)^K:.*$","K: C");
-            result.append(header).append(render(layer.notes, measureTicks(meter),layer.abcPitchShift,bpm));
+            // Retain the requested key signature. Explicit naturals in render()
+            // prevent the signature from changing the pitch of edited notes.
+            int[] signature=keySignature(field(header,"K","C"));
+            // Unplayable notes remain in the MSX editor deltas; omit them ONLY
+            // from rendered ABC. This must agree with red-note highlighting.
+            List<EditableNote> playable = layer.notes.stream()
+                .filter(note -> isPlayableForExport(layer,note))
+                .toList();
+            result.append(header).append(render(playable, measureTicks(meter),layer.abcPitchShift,bpm,signature));
         }
         return result.toString();
     }
+    /** Shared export/preview range check; saving an MSX intentionally does NOT
+     *  use this restriction, so unplayable notes can be corrected later. */
+    public static boolean isPlayableForExport(NoteDocument.Layer layer,EditableNote note) {
+        return LotroPatch.isPlayableSoundingPitch(layer.instrumentName,
+            note.pitch(),layer.abcPitchShift);
+    }
+
     private static int meterDenominator(String meter) throws IOException {
         if (meter.equalsIgnoreCase("C")) return 4;
         if (meter.equalsIgnoreCase("C|")) return 2;
@@ -332,7 +350,8 @@ public final class AbcDocumentIO {
             return length;
         } catch(NumberFormatException ex) { throw new IOException("Unsupported meter for edited ABC part: " + meter); }
     }
-    private static String render(List<EditableNote> notes, long bar, int pitchShift, int bpm) throws IOException {
+    private static String render(List<EditableNote> notes, long bar, int pitchShift, int bpm,
+                                 int[] keySignature) throws IOException {
         TreeSet<Long> edges=new TreeSet<>(); edges.add(0L);
         long finish=0;
         for(EditableNote n:notes){edges.add(n.start());edges.add(n.end());finish=Math.max(finish,n.end());}
@@ -418,14 +437,14 @@ public final class AbcDocumentIO {
             if(sounding.isEmpty())out.append('z').append(length);
             else if(sounding.size()==1) {
                 EditableNote n=sounding.getFirst();
-                out.append(pitch(n.pitch()-pitchShift)).append(length);
+                out.append(pitch(n.pitch()-pitchShift,keySignature)).append(length);
                 if(n.end()>end)out.append('-');
             } else {
                 // LOTRO does not accept a length after ']'. Each member of a
                 // chord must carry its own duration, even when all are equal.
                 out.append('[');
                 for(EditableNote n:sounding) {
-                    out.append(pitch(n.pitch()-pitchShift)).append(length);
+                    out.append(pitch(n.pitch()-pitchShift,keySignature)).append(length);
                     if(n.end()>end)out.append('-');
                 }
                 out.append(']');
@@ -436,11 +455,17 @@ public final class AbcDocumentIO {
         out.append("|]\n\n");
         return out.toString();
     }
-    private static String pitch(int p) throws IOException {
+    private static String pitch(int p,int[] keySignature) throws IOException {
         if (p < 0 || p > 127) throw new IOException("Edited pitch outside LOTRO ABC range");
         int octave=p/12-1, semitone=p%12;
         String[] spelling={"C","^C","D","^D","E","F","^F","G","^G","A","^A","B"};
         String val=spelling[semitone];
+        // When K: G, for example, writing F without an accidental produces F#.
+        // The editor's pitches are absolute, so explicitly naturalize notes
+        // that the key signature would otherwise sharpen or flatten.
+        int[] naturalSemitones={0,2,4,5,7,9,11};
+        for(int i=0;i<naturalSemitones.length;i++)if(semitone==naturalSemitones[i]
+                && keySignature[i]!=0) {val="="+val;break;}
         if(octave>=4)val=val.toLowerCase(Locale.ROOT);
         for(int i=0;i<Math.abs(octave-(octave>=4?4:3));i++)val+=octave>=4?"'":",";
         return val;

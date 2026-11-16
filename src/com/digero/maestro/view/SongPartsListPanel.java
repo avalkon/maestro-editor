@@ -278,13 +278,10 @@ public class SongPartsListPanel extends JPanel implements IDiscardable, TableLay
 			return;
 		}
 
-		int trackNo = part.getPreviewSequenceTrackNumber();
-
-		if (trackNo >= 0) {
-            //System.out.println(part.getTitle()+": updatePartSoloMute trackNo="+trackNo+" part.isSoloed()="+part.isSoloed()+" part.isMuted()="+part.isMuted()+" seq="+abcSequencer);
-			abcSequencer.setTrackMute(trackNo, part.isMuted());
-			abcSequencer.setTrackSolo(trackNo, part.isSoloed());
-		}
+        for (int trackNo : part.getAllPreviewTrackNumbers()) {
+            abcSequencer.setTrackMute(trackNo,part.isMuted());
+            abcSequencer.setTrackSolo(trackNo,part.isSoloed());
+        }
         noteEditorMuteSoloListener.run();
 	}
 	

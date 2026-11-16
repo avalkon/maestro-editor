@@ -131,9 +131,10 @@ public class SequenceInfo implements MidiConstants {
         synchronized (PREVIEW_EXPORT_LOCK) {
             AbcExporter exportCopy = abcSong.getAbcExporter();
             // lock so ProjectFrame worker threads don't go in here before previous is finished
-            SequenceInfo preview = new SequenceInfo(exportCopy, useLotroInstruments);
-            com.digero.maestro.abc.NoteEditorPreviewOverlay.apply(abcSong,preview,exportCopy,useLotroInstruments);
-            return preview;
+            // Overlay authored notes before SequenceDataCache is constructed.
+            // Otherwise a blank new composition's cache describes only the
+            // rest-only starter, even though the MIDI Sequence has longer tracks.
+            return new SequenceInfo(exportCopy, useLotroInstruments, abcSong);
         }
     }
 
@@ -272,7 +273,12 @@ public class SequenceInfo implements MidiConstants {
 	 * This constructor ignores most of the data, as preview is only used for playback
 	 */
 	private SequenceInfo(AbcExporter abcExporter, boolean useLotroInstruments)
-			throws InvalidMidiDataException, AbcConversionException {
+            throws InvalidMidiDataException, AbcConversionException {
+        this(abcExporter, useLotroInstruments, null);
+    }
+
+    private SequenceInfo(AbcExporter abcExporter, boolean useLotroInstruments, AbcSong editorSong)
+            throws InvalidMidiDataException, AbcConversionException {
 		AbcMetadataSource metadata = abcExporter.getMetadataSource();
 		this.fileName = metadata.getSongTitle() + Util.ABC_FILE_EXTENSION;
 		this.composer = metadata.getComposer();
@@ -284,15 +290,26 @@ public class SequenceInfo implements MidiConstants {
         sequence = result.second;
         histogram = result.third;
         dissonance = result.fourth;
-		standard = MidiStandard.PREVIEW;
-		onlyFirstTrackTempos = true;
-		sequenceCache = new SequenceDataCache(sequence, standard,
+        standard = MidiStandard.PREVIEW;
+        onlyFirstTrackTempos = true;
+        // Apply the editor notes BEFORE extracting duration, meter, and tempo.
+        // The original sequence can have no playable tracks at all.
+        if (editorSong != null)
+            com.digero.maestro.abc.NoteEditorPreviewOverlay.apply(
+                editorSong, this, abcExporter, useLotroInstruments);
+        sequenceCache = new SequenceDataCache(sequence, standard,
 				null, null, null, null,
 				portMap, onlyFirstTrackTempos, false, true,
 				"ABC Preview Internal MIDI", usingNewMidiLayout, false);
-		primaryTempoMPQ = sequenceCache.getPrimaryTempoMPQ();
+        primaryTempoMPQ = sequenceCache.getPrimaryTempoMPQ();
+        // Only edited previews need replacing: the standard exporter already
+        // provides the authoritative note/sample polyphony for unedited music.
+        if (editorSong != null && !editorSong.getNoteEditorDeltas().isEmpty()) {
+            histogram.replaceWithPreviewEvents(lastTrackInfos, sequenceCache,
+                editorSong.getSequenceInfo().getDataCache());
+        }
 
-		this.trackInfoList = null;
+        this.trackInfoList = null;
 
 	}
 

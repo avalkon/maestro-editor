@@ -55,6 +55,7 @@ import com.digero.maestro.midi.SequenceDataCache;
 import com.digero.maestro.midi.SequenceInfo;
 import com.digero.maestro.midi.TrackInfo;
 import com.digero.maestro.noteedit.NoteEditorDelta;
+import com.digero.maestro.noteedit.AuthoredTrackRouting;
 import com.digero.maestro.util.FileResolver;
 import com.digero.maestro.util.ListModelWrapper;
 import com.digero.maestro.util.SaveUtil;
@@ -125,8 +126,64 @@ public class AbcSong implements IDiscardable, AbcMetadataSource {
 	private File sourceFile; // The MIDI or ABC file that this song was loaded from
     // Optional fork-owned editor snapshots. Older Maestro ignores these fields.
     private String noteEditorAbc = null;
+    /** Created by File > New ABC. Source ABC is stored in this MSX, not an external file. */
+    private boolean compositionMode;
+    /** Key written in a new ABC composition even when upstream SHOW_KEY_FIELD is disabled. */
+    private String compositionKey = "C";
+    private static String readCompositionKey(String abc) {
+        if(abc == null) return "C";
+        java.util.regex.Matcher match = java.util.regex.Pattern.compile("(?m)^K:\\s*(\\S+)").matcher(abc);
+        return match.find() ? match.group(1) : "C";
+    }
+    public boolean isCompositionMode() { return compositionMode; }
+    /** Called after loading the rest-only ABC scaffold. */
+    public void initializeComposition(String displayName,String embeddedSource,int initialMeasures) {
+        if (!fromAbcFile) throw new IllegalStateException("Only an ABC source can start a blank composition");
+        compositionMode = true;
+        compositionKey = readCompositionKey(embeddedSource);
+        sourceAbcText = embeddedSource;
+        sourceFile = new File(displayName.replace('\\','_').replace('/','_') + ".abc");
+        projectFile = null;
+        exportFile = null;
+        firstExportTime = null;
+        initialCompositionMeasures = initialMeasures;
+    }
+    private int initialCompositionMeasures = 1;
+    public int getInitialCompositionMeasures() { return initialCompositionMeasures; }
+    public java.util.List<com.digero.maestro.noteedit.CompositionAbc.PartSpec> getEditorPartSpecs() {
+        java.util.List<com.digero.maestro.noteedit.CompositionAbc.PartSpec> specs = new java.util.ArrayList<>();
+        String meter = getTimeSignature().numerator + "/" + getTimeSignature().denominator;
+        String key= compositionMode ? compositionKey :
+            getKeySignature().toString().split(" ")[0] +
+            (getKeySignature().mode == com.digero.common.midi.KeyMode.MINOR ? "m" : "");
+        for (AbcPart part : parts) specs.add(new com.digero.maestro.noteedit.CompositionAbc.PartSpec(
+            part.getPartNumber(),part.getTitle(),part.getInstrument().friendlyName,
+            Math.max(20,Math.min(400,getTempoBPM())),meter,key));
+        return specs;
+    }
+    public String addMissingEditorParts(String generated) {
+        return com.digero.maestro.noteedit.CompositionAbc.forEditor(generated,getEditorPartSpecs());
+    }
+    public boolean hasAuthoredPartNotes() {
+        for(var e:getNoteEditorDeltas().values()) if(!e.added().isEmpty())return true;
+        return false;
+    }
+    public boolean hasPreviewableParts() { return getActivePartCount()>0 || hasAuthoredPartNotes(); }
+
     /** Optional note differences against the current GENERATED output, keyed by X:/part number. */
     private volatile Map<Integer, NoteEditorDelta.Part> noteEditorDeltas = Map.of();
+    /** Optional routing of authored piano-roll tracks to one or more Song Parts.
+     * Missing entry means assigned to the originating part (legacy behavior). */
+    private volatile Map<Integer,Set<Integer>> authoredTrackRouting = Map.of();
+    public Map<Integer,Set<Integer>> getAuthoredTrackRouting() { return authoredTrackRouting; }
+    public void setAuthoredTrackRouting(Map<Integer,? extends Set<Integer>> routing) {
+        authoredTrackRouting = AuthoredTrackRouting.copyOf(routing);
+    }
+    private Map<Integer,NoteEditorDelta.Part> routedNoteEditorDeltas() {
+        Set<Integer> current = new LinkedHashSet<>();
+        for (AbcPart part : parts) current.add(part.getPartNumber());
+        return AuthoredTrackRouting.forExport(getNoteEditorDeltas(),authoredTrackRouting,current);
+    }
     /** v1.5.4 stored the written LOTRO note number rather than sounding pitch. */
     private boolean noteEditorDeltasLegacyPitch;
     public synchronized Map<Integer, NoteEditorDelta.Part> getNoteEditorDeltas() {
@@ -585,6 +642,14 @@ public class AbcSong implements IDiscardable, AbcMetadataSource {
 			}
 
             // Optional note editor snapshots; normal Maestro import is unchanged.
+            Element compositionElement = XmlUtil.selectSingleElement(songEle, "composition");
+            if(compositionElement != null) {
+                compositionMode = Boolean.parseBoolean(compositionElement.getAttribute("enabled"));
+                compositionKey = compositionElement.hasAttribute("key") ?
+                    compositionElement.getAttribute("key") : readCompositionKey(sourceAbcText);
+                initialCompositionMeasures = Math.max(1,Math.min(2000,
+                    SaveUtil.parseValue(compositionElement,"@measures",1)));
+            }
             Element editorElement = XmlUtil.selectSingleElement(songEle, "noteEditor");
             if (editorElement != null) {
                 Element partSnapshot = XmlUtil.selectSingleElement(editorElement, "abc");
@@ -617,6 +682,23 @@ public class AbcSong implements IDiscardable, AbcMetadataSource {
                     }
                 }
                 noteEditorDeltas = Map.copyOf(deltas);
+                Map<Integer,Set<Integer>> routing = new LinkedHashMap<>();
+                org.w3c.dom.NodeList routedTracks = editorElement.getElementsByTagName("authoredTrack");
+                for (int r=0;r<routedTracks.getLength();r++) {
+                    try {
+                        Element routingElement=(Element)routedTracks.item(r);
+                        int source=Integer.parseInt(routingElement.getAttribute("source"));
+                        Set<Integer> destinations=new LinkedHashSet<>();
+                        String csv=routingElement.getAttribute("destinations");
+                        if (!csv.isBlank()) for (String value:csv.split(","))
+                            destinations.add(Integer.parseInt(value.strip()));
+                        routing.put(source,destinations);
+                    } catch (RuntimeException malformed) {
+                        log.warning("Ignored invalid authored track route: "+malformed.getMessage());
+                    }
+                }
+                authoredTrackRouting = AuthoredTrackRouting.copyOf(routing);
+
                 noteEditorDeltasLegacyPitch = !"3".equals(editorElement.getAttribute("version"));
                 if (midiSnapshot != null) {
                     String encoded = midiSnapshot.getTextContent().strip();
@@ -1159,7 +1241,13 @@ public class AbcSong implements IDiscardable, AbcMetadataSource {
 			if (sourceAbcBPM != null) abcEle.setAttribute("bpm", Integer.toString(sourceAbcBPM));
 		}
 
-        if (noteEditorAbc != null || noteEditorMidiBase64 != null || !noteEditorDeltas.isEmpty()) {
+        if(compositionMode) {
+            Element composition = (Element)songEle.appendChild(doc.createElement("composition"));
+            composition.setAttribute("enabled","true");
+            composition.setAttribute("measures",Integer.toString(initialCompositionMeasures));
+            composition.setAttribute("key",compositionKey);
+        }
+        if (noteEditorAbc != null || noteEditorMidiBase64 != null || !noteEditorDeltas.isEmpty() || !authoredTrackRouting.isEmpty()) {
             Element editor = (Element) songEle.appendChild(doc.createElement("noteEditor"));
             editor.setAttribute("version", "3");
             for(var entry : getNoteEditorDeltas().entrySet()) {
@@ -1169,6 +1257,12 @@ public class AbcSong implements IDiscardable, AbcMetadataSource {
                     appendEditorDelta(doc,part,"remove",note);
                 for(NoteEditorDelta.Value note : entry.getValue().added())
                     appendEditorDelta(doc,part,"add",note);
+            }
+            for (var entry : authoredTrackRouting.entrySet()) {
+                Element route=(Element)editor.appendChild(doc.createElement("authoredTrack"));
+                route.setAttribute("source",Integer.toString(entry.getKey()));
+                route.setAttribute("destinations",entry.getValue().stream()
+                    .sorted().map(String::valueOf).collect(java.util.stream.Collectors.joining(",")));
             }
             if (noteEditorAbc != null) {
                 Element abc = (Element) editor.appendChild(doc.createElement("abc"));
@@ -1277,8 +1371,12 @@ public class AbcSong implements IDiscardable, AbcMetadataSource {
 		}
         java.io.ByteArrayOutputStream generated = new java.io.ByteArrayOutputStream();
         PolyphonyHistogram poly = getAbcExporter().exportToAbc(generated, delayEnabled, appName, minDelay);
-        if (includeEditorNotes && !noteEditorDeltas.isEmpty()) {
-            String combined = NoteEditorDelta.mergeAbc(generated.toString(StandardCharsets.UTF_8), noteEditorDeltas);
+        if (includeEditorNotes && (compositionMode || !noteEditorDeltas.isEmpty())) {
+            Map<Integer,NoteEditorDelta.Part> routed = routedNoteEditorDeltas();
+            String baseline = com.digero.maestro.noteedit.CompositionAbc.forExport(
+                generated.toString(StandardCharsets.UTF_8), getEditorPartSpecs(),
+                routed, compositionMode);
+            String combined = NoteEditorDelta.mergeAbc(baseline, routed);
             Files.writeString(exportFile.toPath(), combined, StandardCharsets.UTF_8);
         } else {
             Files.write(exportFile.toPath(), generated.toByteArray());
@@ -2379,8 +2477,12 @@ public class AbcSong implements IDiscardable, AbcMetadataSource {
         this.sequenceInfo = other.sequenceInfo;// lets assume the midi don't change while we work, then this is immutable
         this.timingInfo = other.timingInfo;// would be time-consuming to deep copy, plus it's kinda immutable
 		this.sourceAbcText = other.sourceAbcText;
+        this.compositionMode = other.compositionMode;
+        this.compositionKey = other.compositionKey;
+        this.initialCompositionMeasures = other.initialCompositionMeasures;
         this.noteEditorAbc = other.noteEditorAbc;
         this.noteEditorDeltas = other.noteEditorDeltas;
+        this.authoredTrackRouting = other.authoredTrackRouting;
         this.noteEditorDeltasLegacyPitch = other.noteEditorDeltasLegacyPitch;
         this.noteEditorMidiBase64 = other.noteEditorMidiBase64;
 		this.sourceAbcBPM = other.sourceAbcBPM;

@@ -192,6 +192,51 @@ public class PolyphonyHistogram   {
 		dirty = true;
 	}
 	
+    /**
+     * Rebuild the overall preview count from the FINAL graph events, after the
+     * piano-roll overlay and routing have been applied. It deliberately counts
+     * simultaneous note durations rather than the extra sample decay used by
+     * the normal exporter. Unedited projects retain the normal histogram.
+     *
+     * Preview event ticks and source timeline ticks use different resolutions.
+     * The preview cache supplies time; the source cache supplies the x positions
+     * used by Maestro's existing histogram NoteGraph.
+     */
+    public void replaceWithPreviewEvents(java.util.List<AbcExporter.ExportTrackInfo> tracks,
+                                         SequenceDataCache previewCache,
+                                         SequenceDataCache sourceCache) {
+        histogramData.clear();
+        if (tracks == null || previewCache == null || sourceCache == null) {
+            dirty = true;
+            return;
+        }
+        for (AbcExporter.ExportTrackInfo track : tracks) {
+            if (track.part == null || track.noteEvents == null) continue;
+            TreeMap<Long, Triple<Long,Integer,Long>> partMap = histogramData
+                    .computeIfAbsent(track.part.uniqueID, id -> new TreeMap<>());
+            for (AbcNoteEvent event : track.noteEvents) {
+                if (event.getEndTick() <= event.getStartTick() || event.note == Note.REST) continue;
+                addPreviewBoundary(partMap, previewCache, sourceCache, event.getStartTick(), 1);
+                addPreviewBoundary(partMap, previewCache, sourceCache, event.getEndTick(), -1);
+            }
+        }
+        dirty = true;
+    }
+
+    private static void addPreviewBoundary(TreeMap<Long, Triple<Long,Integer,Long>> map,
+                                           SequenceDataCache preview,
+                                           SequenceDataCache source,
+                                           long previewTick, int delta) {
+        long previewMicros = preview.tickToMicros(previewTick);
+        long sourceTick = source.microsToTick(previewMicros);
+        Triple<Long,Integer,Long> value = map.get(previewMicros);
+        if (value == null) {
+            value = new Triple<>(sourceTick, 0, source.tickToMicros(sourceTick));
+            map.put(previewMicros, value);
+        }
+        value.second += delta;
+    }
+
 	public void clearAll() {
 		histogramData.clear();
 	}
@@ -396,7 +441,7 @@ public class PolyphonyHistogram   {
                 //peakTick = entry.getValue().first; we already calculated this from the non-muted parts.
             }
         }
-        average = average / sumMicros;
+        average = sumMicros > 0 ? average / sumMicros : 0.0;
 
         //part specific sum:
         partSum = new HashMap<>();// partID -> tick, part-polyphony, midi-micros
