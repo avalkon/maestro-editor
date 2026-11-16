@@ -27,7 +27,7 @@ issue or contact me in-game, or find me through the official LotRO or Sting disc
 - Strict LOTRO exported ABC should be validated in ABC Player; keep backups.
 
 
-See the editable 4.7.7-B1 User Manual (most sections remain applicable); see docs/NEW_ABC_COMPOSITION_B2.md for workflows, shortcuts, and limitations.
+See the User Manual for feature overviews, workflows, shortcuts, and limitations.
 
 ## Upstream project history
 
