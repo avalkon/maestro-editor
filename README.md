@@ -13,10 +13,9 @@ For End Users:
 
 See [latest releases](https://github.com/avalkon/maestro-editor/releases)  for downloads.
 
-This beta combines Maestro 4.7.6-derived source with the integrated piano-roll
-updates and introduces **File → New ABC Composition**, with project-owned notes,
-LOTRO instrument parts, and preview-visible authored parts. Import-based export
-still omits empty tracks, as in upstream Maestro.
+Beta 2 combines Maestro 4.7.6-derived source with an integrated piano-roll and introduces 
+**File → New ABC Composition**, with project-owned notes,LotRO instrument parts, and 
+preview-visible authored parts. Import-based export still omits empty tracks, as in upstream Maestro.
 
 If you encounter any issues you can't figure out, please feel free to submit an 
 issue or contact me in-game, or find me through the official LotRO or Sting discords.
@@ -24,12 +23,9 @@ issue or contact me in-game, or find me through the official LotRO or Sting disc
 
 ## Known beta caveats
 
-- Original MIDI edits can be staged as snapshots but do not necessarily replace
-  Maestro's underlying conversion source.
 - ABC part delta rebasing after major arrangement changes can be imperfect.
 - Strict LOTRO exported ABC should be validated in ABC Player; keep backups.
-- Source history documents may reference earlier editor versions; those are
-  historical descriptions, not claims about the current 4.7.7-B2 version.
+
 
 See the editable 4.7.7-B1 User Manual (most sections remain applicable); see docs/NEW_ABC_COMPOSITION_B2.md for workflows, shortcuts, and limitations.
 
