@@ -104,7 +104,7 @@ public class SettingsDialog extends JDialog implements TableLayoutConstants {
 		this.instrNameSettings = instrNameSettings;
 		this.saveSettings = saveSettings;
 		this.miscSettings = miscSettings;
-        this.shortcutsPanel = new ShortcutSettingsPanel(shortcuts.snapshot());
+        this.shortcutsPanel = new ShortcutSettingsPanel(shortcuts.snapshot(), shortcuts.getNoteClickShortcut());
 
 		JButton okButton = new JButton("OK");
 		getRootPane().setDefaultButton(okButton);
@@ -203,6 +203,9 @@ public class SettingsDialog extends JDialog implements TableLayoutConstants {
     }
 
 	public java.util.Map<String, KeyStroke> getShortcutBindings() { return shortcutsPanel.getBindings(); }
+    public ShortcutManager.NoteClickShortcut getNoteClickShortcut() {
+        return shortcutsPanel.getNoteClickShortcut();
+    }
 
 	private JPanel createNumberingPanel() {
 		JLabel instrumentsTitle = new JLabel(UIText.get("maestro.options.html.b.u.first.part.number.u.b.html"));

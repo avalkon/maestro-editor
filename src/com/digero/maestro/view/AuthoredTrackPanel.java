@@ -35,6 +35,7 @@ public final class AuthoredTrackPanel extends JPanel implements ArrangementViewI
     private final JPanel assignmentStripe;
     private final int sourcePartNumber;
     private final int selectedPartNumber;
+    private final AbcPart destinationPart;
     private boolean assignedAnywhere;
     private final Set<Integer> localDestinations;
     private boolean abcPreviewMode;
@@ -46,6 +47,7 @@ public final class AuthoredTrackPanel extends JPanel implements ArrangementViewI
         super(new BorderLayout(4, 0));
         this.sourcePartNumber = sourcePartNumber;
         selectedPartNumber = selectedPart.getPartNumber();
+        destinationPart = selectedPart;
         localDestinations = new java.util.LinkedHashSet<>(destinations);
         boolean assignedHere = localDestinations.contains(selectedPartNumber);
         assignedAnywhere = !localDestinations.isEmpty();
@@ -55,6 +57,11 @@ public final class AuthoredTrackPanel extends JPanel implements ArrangementViewI
         graph = new NoteGraph(sequencer, selectedPart.getSequenceInfo(),
                 Note.MIN_PLAYABLE.id - 12, Note.MAX_PLAYABLE.id + 12) {
             @Override protected List<NoteEvent> getEvents() { return events; }
+            // NoteGraph's default requires an imported TrackInfo. Authored
+            // lanes have none; follow their routed MIDI preview track instead.
+            @Override protected boolean isShowingNotesOn() {
+                return isAuthoredPlaybackActive(sequencer);
+            }
         };
         graph.setPreferredSize(new Dimension(48, 48));
         graph.setOctaveLinesVisible(!pitchPart.getInstrument().isPercussion);
@@ -124,6 +131,16 @@ public final class AuthoredTrackPanel extends JPanel implements ArrangementViewI
                 : anyAssigned ? ColorTable.PANEL_HIGHLIGHT_OTHER_PART.get() : bg);
         graph.repaint();
         repaint();
+    }
+
+    private boolean isAuthoredPlaybackActive(SequencerWrapper sequencer) {
+        if (!abcPreviewMode || !routeBox.isSelected() || !sequencer.isRunning())
+            return false;
+        for (var track : destinationPart.getAuthoredPreviewTracks()) {
+            if (track.sourcePartNumber == sourcePartNumber && sequencer.isTrackActive(track.trackNumber))
+                return true;
+        }
+        return false;
     }
 
     public int getSourcePartNumber() { return sourcePartNumber; }

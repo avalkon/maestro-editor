@@ -193,41 +193,77 @@ public class PolyphonyHistogram   {
 	}
 	
     /**
-     * Rebuild the overall preview count from the FINAL graph events, after the
-     * piano-roll overlay and routing have been applied. It deliberately counts
-     * simultaneous note durations rather than the extra sample decay used by
-     * the normal exporter. Unedited projects retain the normal histogram.
+     * Apply piano-roll changes to the exporter's instrument-aware histogram.
      *
-     * Preview event ticks and source timeline ticks use different resolutions.
-     * The preview cache supplies time; the source cache supplies the x positions
-     * used by Maestro's existing histogram NoteGraph.
+     * The exporter has already counted every generated part with LOTRO's actual
+     * sample lengths, quantization and release behavior. Do not erase those
+     * counts when an authored track is added: a plucked sample keeps ringing
+     * after the written NOTE_OFF, and recalculating the entire song from raw
+     * preview note lengths can dramatically under-report voice usage.
+     *
+     * For source parts with deleted/replaced notes, rebuild only that part's
+     * generated events. Independently routed authored tracks are then merged
+     * into their destination part's event map. Both use the SAME sample sustain
+     * rules as count(), so short authored Lute of Ages notes still ring out.
      */
-    public void replaceWithPreviewEvents(java.util.List<AbcExporter.ExportTrackInfo> tracks,
+    public void applyEditedPreviewEvents(List<AbcExporter.ExportTrackInfo> tracks,
                                          SequenceDataCache previewCache,
-                                         SequenceDataCache sourceCache) {
-        histogramData.clear();
-        if (tracks == null || previewCache == null || sourceCache == null) {
-            dirty = true;
-            return;
+                                         SequenceDataCache sourceCache,
+                                         Set<Integer> rebuiltSourcePartNumbers) throws IOException {
+        if (tracks == null || previewCache == null || sourceCache == null) return;
+
+        Set<Long> rebuiltPartIds = new HashSet<>();
+        for (AbcExporter.ExportTrackInfo track : tracks) {
+            if (track.part != null && !(track instanceof AuthoredPreviewTrackInfo)
+                    && rebuiltSourcePartNumbers.contains(track.part.getPartNumber())) {
+                if (rebuiltPartIds.add(track.part.uniqueID))
+                    histogramData.remove(track.part.uniqueID);
+            }
         }
+
         for (AbcExporter.ExportTrackInfo track : tracks) {
             if (track.part == null || track.noteEvents == null) continue;
+            boolean authored = track instanceof AuthoredPreviewTrackInfo;
+            if (!authored && !rebuiltPartIds.contains(track.part.uniqueID)) continue;
+
             TreeMap<Long, Triple<Long,Integer,Long>> partMap = histogramData
                     .computeIfAbsent(track.part.uniqueID, id -> new TreeMap<>());
+            LotroInstrument instrument = track.part.getInstrument();
             for (AbcNoteEvent event : track.noteEvents) {
-                if (event.getEndTick() <= event.getStartTick() || event.note == Note.REST) continue;
-                addPreviewBoundary(partMap, previewCache, sourceCache, event.getStartTick(), 1);
-                addPreviewBoundary(partMap, previewCache, sourceCache, event.getEndTick(), -1);
+                if (event.note.id == Note.REST.id || event.getEndTick() <= event.getStartTick())
+                    continue;
+                long startMicros = previewCache.tickToMicros(event.getStartTick());
+                long noteOffMicros = previewCache.tickToMicros(event.getEndTick());
+                long endMicros = sampleEndMicros(instrument, event.note.id,
+                        startMicros, noteOffMicros);
+                if (endMicros <= startMicros) continue;
+                addPreviewBoundaryAtMicros(partMap, sourceCache, startMicros, 1);
+                addPreviewBoundaryAtMicros(partMap, sourceCache, endMicros, -1);
             }
         }
         dirty = true;
     }
 
-    private static void addPreviewBoundary(TreeMap<Long, Triple<Long,Integer,Long>> map,
-                                           SequenceDataCache preview,
-                                           SequenceDataCache source,
-                                           long previewTick, int delta) {
-        long previewMicros = preview.tickToMicros(previewTick);
+    /** Identical release/sample-duration policy to the normal exporter count(). */
+    private static long sampleEndMicros(LotroInstrument instrument, int noteId,
+                                         long startMicros, long noteOffMicros) throws IOException {
+        Long duration = LotroInstrumentSampleDuration.getDura(instrument.friendlyName, noteId);
+        if (instrument.isSustainable(noteId)) {
+            long endMicros = noteOffMicros + 200_000L;
+            return duration == null ? endMicros : Math.min(endMicros, startMicros + duration);
+        }
+        if (duration == null) {
+            log.warning("LotroInstrumentSampleDuration has no " + instrument.friendlyName
+                    + " with note " + noteId);
+            duration = AbcConstants.ONE_SECOND_MICROS;
+        }
+        // Plucked/percussive instruments ignore the written note-off entirely.
+        return startMicros + duration;
+    }
+
+    private static void addPreviewBoundaryAtMicros(TreeMap<Long, Triple<Long,Integer,Long>> map,
+                                                   SequenceDataCache source,
+                                                   long previewMicros, int delta) {
         long sourceTick = source.microsToTick(previewMicros);
         Triple<Long,Integer,Long> value = map.get(previewMicros);
         if (value == null) {
@@ -235,6 +271,18 @@ public class PolyphonyHistogram   {
             map.put(previewMicros, value);
         }
         value.second += delta;
+    }
+
+    /** Per-part peak using the same sound durations as the overall histogram. */
+    public int peakForPart(AbcPart part) {
+        TreeMap<Long, Triple<Long,Integer,Long>> boundaries = histogramData.get(part.uniqueID);
+        if (boundaries == null) return 0;
+        int active = 0, peak = 0;
+        for (Triple<Long,Integer,Long> event : boundaries.values()) {
+            active += event.second;
+            peak = Math.max(peak, active);
+        }
+        return peak;
     }
 
 	public void clearAll() {

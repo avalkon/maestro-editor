@@ -36,6 +36,28 @@ public final class PianoRollPanel extends JComponent {
     private int previewPitch;
     private long previewTick, playheadTick;
     private boolean dragging, resizing, seeking, selectingBox;
+    private boolean noteClickEnabled;
+    private int noteClickModifiers;
+
+    /** Exact modifier combination; normal double-click note creation is unaffected. */
+    public void setNoteCreationMouseGesture(boolean enabled, int modifiers) {
+        int allowed = InputEvent.CTRL_DOWN_MASK | InputEvent.ALT_DOWN_MASK |
+                InputEvent.SHIFT_DOWN_MASK | InputEvent.META_DOWN_MASK;
+        if ((modifiers & ~allowed) != 0 || (enabled && modifiers == 0))
+            throw new IllegalArgumentException("A modifier is required for note click");
+        noteClickEnabled = enabled;
+        noteClickModifiers = modifiers;
+        String extra = enabled ? " or modifier+click" : "";
+        setToolTipText("Drag to move/resize; double-click" + extra +
+                " to add; right-click a note to delete; Shift extends box selections.");
+    }
+    private boolean isNoteCreationClick(MouseEvent e) {
+        int allowed = InputEvent.CTRL_DOWN_MASK | InputEvent.ALT_DOWN_MASK |
+                InputEvent.SHIFT_DOWN_MASK | InputEvent.META_DOWN_MASK;
+        return noteClickEnabled && noteClickModifiers != 0 &&
+                (e.getModifiersEx() & allowed) == noteClickModifiers &&
+                SwingUtilities.isLeftMouseButton(e) && e.getX() >= KEY_WIDTH && e.getY() >= TOP;
+    }
 
     public PianoRollPanel() {
         setOpaque(true);
@@ -48,7 +70,12 @@ public final class PianoRollPanel extends JComponent {
             }
             @Override public void mouseDragged(MouseEvent e) { dragged(e); }
             @Override public void mouseReleased(MouseEvent e) { released(); }
-            @Override public void mouseClicked(MouseEvent e) { if(e.getClickCount()==2 && SwingUtilities.isLeftMouseButton(e) && e.getY()>=TOP) add(e); }
+            @Override public void mouseClicked(MouseEvent e) {
+                if (e.getClickCount() == 2 && SwingUtilities.isLeftMouseButton(e) && e.getY() >= TOP)
+                    add(e); // Always preserve the existing double-click gesture.
+                else if (e.getClickCount() == 1 && isNoteCreationClick(e))
+                    add(e);
+            }
             @Override public void mouseWheelMoved(MouseWheelEvent e) { zoom(e); }
         };
         addMouseListener(mouse);
@@ -466,7 +493,8 @@ public final class PianoRollPanel extends JComponent {
     private void pressed(MouseEvent e){
         if(document==null||!SwingUtilities.isLeftMouseButton(e))return;
         requestFocusInWindow();anchor=e.getPoint();pointer=e.getPoint();dragging=false;selectingBox=false;
-        seeking=e.getY()<TOP || Math.abs(e.getX()-x(playheadTick))<=4 && e.isAltDown();
+        seeking=e.getY()<TOP || (Math.abs(e.getX()-x(playheadTick))<=4 && e.isAltDown()
+                && !(isNoteCreationClick(e) && hit(e.getPoint()) == null));
         if(seeking){setPlayheadTick(snapped(tick(e.getX())));onSeek.run();return;}
         Hit h=hit(e.getPoint());previewTick=0;previewPitch=0;resizing=false;
         if(h==null){if(!e.isShiftDown())selected.clear();marquee=new Rectangle(e.getX(),e.getY(),0,0);repaint();return;}

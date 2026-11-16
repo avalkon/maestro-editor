@@ -207,6 +207,10 @@ public final class NoteEditorApp {
         }
         private JButton button(String text,Runnable action){JButton b=new JButton(text);b.addActionListener(e->action.run());return b;}
         public void setMinimumMeasures(int count){roll.setMinimumMeasureCount(count);}
+        /** Configure the optional note-creation mouse gesture in both embedded editors. */
+        public void setNoteCreationMouseGesture(boolean enabled, int modifiers) {
+            roll.setNoteCreationMouseGesture(enabled, modifiers);
+        }
         public void fitView(){SwingUtilities.invokeLater(()->{roll.fitFullPitchRange();
             if(scroller.getRowHeader()!=null){scroller.getRowHeader().getView().revalidate();scroller.getRowHeader().repaint();}
         });}

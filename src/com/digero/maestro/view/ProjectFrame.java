@@ -1659,6 +1659,8 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
 				miscSettings.copyFrom(dialog.getMiscSettings());
 				miscSettings.saveToPrefs();
                 keyboardShortcuts.setBindings(dialog.getShortcutBindings());
+                keyboardShortcuts.setNoteClickShortcut(dialog.getNoteClickShortcut());
+                updateRollNoteClickShortcuts();
                 onSaveAndExportSettingsChanged();
 			} else if (dialog.isSettingPageReset()) {
 				tab = dialog.getResetPageIndex();
@@ -1686,6 +1688,8 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
 					break;
                 case 6: // keyboard shortcuts
                     keyboardShortcuts.setBindings(ShortcutManager.defaults());
+                    keyboardShortcuts.setNoteClickShortcut(ShortcutManager.defaultNoteClickShortcut());
+                    updateRollNoteClickShortcuts();
                     break;
 				}
 				showSettingsAgain = true;
@@ -3373,44 +3377,38 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
                     } else {
                         trackInfo.part.setPreviewSequenceTrackNumber(trackInfo.trackNumber);
                     }
-                    trackInfo.part.numberOfExportedNotes = trackInfo.numberOfExportedNotes;
-                    trackInfo.part.numberOfRemovedNotesForSafety = trackInfo.numberOfRemovedNotesForSafety;
-                    trackInfo.part.numberOfRemovedNotesFromPruning = trackInfo.numberOfRemovedNotesFromPruning;
-                    trackInfo.part.numberOfRemovedNotesZeros = trackInfo.numberOfRemovedNotesZeros;
-                    trackInfo.part.numberOfRemovedNotesFromFitting = trackInfo.numberOfRemovedNotesFromFitting;
-                    trackInfo.part.setMaxPoly(trackInfo.maxPoly);
+                    // Several preview tracks can belong to the same Song Part:
+                    // a generated source track plus one or more routed piano-roll
+                    // tracks. Add their counts instead of letting the last authored
+                    // track overwrite the imported total. The removed-note stats
+                    // still originate solely from the generated exporter.
+                    if (!(trackInfo instanceof com.digero.maestro.abc.AuthoredPreviewTrackInfo)) {
+                        trackInfo.part.numberOfRemovedNotesForSafety += trackInfo.numberOfRemovedNotesForSafety;
+                        trackInfo.part.numberOfRemovedNotesFromPruning += trackInfo.numberOfRemovedNotesFromPruning;
+                        trackInfo.part.numberOfRemovedNotesZeros += trackInfo.numberOfRemovedNotesZeros;
+                        trackInfo.part.numberOfRemovedNotesFromFitting += trackInfo.numberOfRemovedNotesFromFitting;
+                        trackInfo.part.setMaxPoly(trackInfo.maxPoly);
+                    }
                     if (!(trackInfo instanceof com.digero.maestro.abc.AuthoredPreviewTrackInfo))
                         trackInfo.part.setPanEvent(trackInfo.panEvent);
 					trackInfo.seqInfo = previewSequenceInfo;
                     //System.out.println(trackInfo);
                 }
             }
+            // Reconcile ALL tracks per part, not just whichever (often authored)
+            // track happens to appear last in the preview metadata list.
+            com.digero.maestro.abc.PreviewPartStats.updateExportedNoteCounts(
+                previewSequenceInfo.getLastTrackInfos());
             // The selected part's separate authored-track graphs must be
             // reconstructed after receiving new preview metadata. Without this
             // they remain invisible until the user reselects the Song Part.
-            // Account for simultaneous notes across generated and authored
-            // routes when displaying the selected part's polyphony limit.
-            // (The original exporter histogram remains authoritative for
-            // entirely unedited parts.)
+            // Use instrument-aware audio voice durations for the per-part peak
+            // as well: raw piano-roll NOTE_OFF edges are not when a plucked
+            // sample stops sounding in LOTRO.
             for (AbcPart part : abcSong.getParts()) {
-                if (part.getAuthoredPreviewTracks().isEmpty()) continue;
-                java.util.List<long[]> edges=new java.util.ArrayList<>();
-                for (var trackInfo:previewSequenceInfo.getLastTrackInfos()) {
-                    if (trackInfo.part != part || trackInfo.noteEvents == null) continue;
-                    for (var note:trackInfo.noteEvents) {
-                        if (note.getEndTick() <= note.getStartTick()) continue;
-                        edges.add(new long[]{note.getStartTick(),1});
-                        edges.add(new long[]{note.getEndTick(),-1});
-                    }
-                }
-                edges.sort(java.util.Comparator.<long[]>comparingLong(a->a[0])
-                    .thenComparingLong(a->a[1]));
-                int voices=0,peak=0;
-                for (long[] edge:edges) {
-                    voices+=(int)edge[1];
-                    peak=Math.max(peak,voices);
-                }
-                part.setMaxPoly(peak);
+                if (!part.getAuthoredPreviewTracks().isEmpty()
+                        || abcSong.getNoteEditorDeltas().containsKey(part.getPartNumber()))
+                    part.setMaxPoly(previewSequenceInfo.histogram.peakForPart(part));
             }
             abcSequencer.setStartTick(abcPreviewStartTick);// Needed for MP3 and WAV exports.
 			if (songCopy != null && songCopy.getCountIn() != null) {
@@ -3578,9 +3576,10 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
             // abcSong.setShowPruned(saveSettings.showPruned);
             AbcExporter exporter = abcSong.getAbcExporter();
             exporter.stereoPan = prefs.getInt("stereoPan", defaultStereo);
-            SequenceInfo previewSequenceInfo = SequenceInfo.fromAbcParts(exporter, !failedToLoadLotroInstruments, false);
-            com.digero.maestro.abc.NoteEditorPreviewOverlay.apply(abcSong,previewSequenceInfo,
-                exporter,!failedToLoadLotroInstruments);
+            // Overlay authored tracks while constructing SequenceInfo, before its
+            // tempo cache and polyphony histogram are finalized (as in the worker).
+            SequenceInfo previewSequenceInfo = SequenceInfo.fromAbcParts(exporter, abcSong,
+                !failedToLoadLotroInstruments, false);
             applyPreview(previewSequenceInfo, exporter, requestSeq);
             setSourceChangeEnabled(true);
             return true;
@@ -3968,6 +3967,13 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
                 abcSong.getNoteEditorDeltas()));
         }
     }
+    private void updateRollNoteClickShortcuts() {
+        ShortcutManager.NoteClickShortcut shortcut = keyboardShortcuts.getNoteClickShortcut();
+        if (midiRollEditor != null)
+            midiRollEditor.setNoteCreationMouseGesture(shortcut.enabled(), shortcut.modifiers());
+        if (abcRollEditor != null)
+            abcRollEditor.setNoteCreationMouseGesture(shortcut.enabled(), shortcut.modifiers());
+    }
     private void leavePianoRoll(){
         rollBaselineRefreshTimer.stop();
         if(midiRollEditor!=null)midiRollEditor.suspendEmbeddedView();
@@ -4096,6 +4102,7 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
                             abcRollEditor.reloadGeneratedAbc(Files.readString(files[1].toPath()),current.getNoteEditorDeltas());
                         rollModeHost.add(abcRollEditor,"abcRoll");
                     }
+                    updateRollNoteClickShortcuts();
                     if(midiRollEditor!=null)midiRollEditor.setFollowSupplier(arrangementView::isFollowEnabled);
                     AbcPart selectedPart=songPartsListPanel.getSelectedPart();
                     if(abcRollEditor!=null && selectedPart!=null)

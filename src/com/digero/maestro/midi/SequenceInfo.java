@@ -123,6 +123,19 @@ public class SequenceInfo implements MidiConstants {
 	}
 
     /**
+     * Build an immediate preview through the same overlay and histogram path
+     * as the background worker. Applying edited tracks after SequenceInfo has
+     * built its tempo cache leaves authored notes out of the polyphony graph.
+     */
+    public static SequenceInfo fromAbcParts(AbcExporter exporter, AbcSong editorSong,
+            boolean useLotroInstruments, boolean oldVelocities)
+            throws InvalidMidiDataException, AbcConversionException {
+        synchronized (PREVIEW_EXPORT_LOCK) {
+            return new SequenceInfo(exporter, useLotroInstruments, editorSong);
+        }
+    }
+
+    /**
      * Will export a new preview using a deep copy of AbcSong.
      * QTM and SequenceInfo are not copied, so the source must not change while in progress.
      */
@@ -302,12 +315,23 @@ public class SequenceInfo implements MidiConstants {
 				portMap, onlyFirstTrackTempos, false, true,
 				"ABC Preview Internal MIDI", usingNewMidiLayout, false);
         primaryTempoMPQ = sequenceCache.getPrimaryTempoMPQ();
-        // Only edited previews need replacing: the standard exporter already
-        // provides the authoritative note/sample polyphony for unedited music.
+        // Keep the exporter's existing sample-aware polyphony for all unedited
+        // parts. Rebuild only generated parts with removed notes, then merge the
+        // authored routes using real LOTRO instrument sample durations.
         if (editorSong != null && !editorSong.getNoteEditorDeltas().isEmpty()) {
-            histogram.replaceWithPreviewEvents(lastTrackInfos, sequenceCache,
-                editorSong.getSequenceInfo().getDataCache());
+            java.util.Set<Integer> removedPartNumbers = new java.util.HashSet<>();
+            for (var entry : editorSong.getNoteEditorDeltas().entrySet()) {
+                if (!entry.getValue().removed().isEmpty())
+                    removedPartNumbers.add(entry.getKey());
+            }
+            try {
+                histogram.applyEditedPreviewEvents(lastTrackInfos, sequenceCache,
+                    editorSong.getSequenceInfo().getDataCache(), removedPartNumbers);
+            } catch (java.io.IOException ex) {
+                throw new AbcConversionException("Failed to read instrument sample durations for piano-roll preview.", ex);
+            }
         }
+
 
         this.trackInfoList = null;
 

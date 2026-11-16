@@ -34,6 +34,27 @@ public final class ShortcutManager implements AutoCloseable {
     private static final int MODIFIERS = InputEvent.CTRL_DOWN_MASK | InputEvent.SHIFT_DOWN_MASK
             | InputEvent.ALT_DOWN_MASK | InputEvent.META_DOWN_MASK;
     private static KeyStroke key(int code, int mod) { return KeyStroke.getKeyStroke(code, mod); }
+
+    /** Optional piano-roll mouse gesture, separate from keyboard-only shortcuts. */
+    public record NoteClickShortcut(boolean enabled, int modifiers) {
+        public NoteClickShortcut {
+            if ((modifiers & ~MODIFIERS) != 0 || (enabled && modifiers == 0))
+                throw new IllegalArgumentException("Note creation requires Ctrl, Alt, Shift or Meta + left click");
+        }
+    }
+    public static NoteClickShortcut defaultNoteClickShortcut() {
+        return new NoteClickShortcut(false, InputEvent.CTRL_DOWN_MASK);
+    }
+    public static int mouseModifiersMask() { return MODIFIERS; }
+    public static String prettyMouseModifiers(int modifiers) {
+        if (modifiers == 0) return "Not assigned";
+        StringBuilder sb = new StringBuilder();
+        if ((modifiers & InputEvent.CTRL_DOWN_MASK) != 0) sb.append("Ctrl+");
+        if ((modifiers & InputEvent.ALT_DOWN_MASK) != 0) sb.append("Alt+");
+        if ((modifiers & InputEvent.SHIFT_DOWN_MASK) != 0) sb.append("Shift+");
+        if ((modifiers & InputEvent.META_DOWN_MASK) != 0) sb.append("Meta+");
+        return sb.append("Click").toString();
+    }
     private static final List<Definition> DEFAULTS = List.of(
             new Definition("transport.play", "Playback", "Play / Pause (Space is always active)", null),
             new Definition("transport.stop", "Playback", "Stop", key(KeyEvent.VK_PERIOD, InputEvent.CTRL_DOWN_MASK)),
@@ -75,6 +96,9 @@ public final class ShortcutManager implements AutoCloseable {
             new Definition("tools.about", "Tools", "About", key(KeyEvent.VK_F1, 0))
     );
 
+    private static final String NOTE_CLICK_ENABLED_PREF = "pianoRoll.noteClickEnabled";
+    private static final String NOTE_CLICK_MODIFIERS_PREF = "pianoRoll.noteClickModifiers";
+    private NoteClickShortcut noteClickShortcut;
     private final Preferences prefs;
     private final LinkedHashMap<String, KeyStroke> bindings = new LinkedHashMap<>();
     private final Map<String, Runnable> actions = new LinkedHashMap<>();
@@ -87,6 +111,14 @@ public final class ShortcutManager implements AutoCloseable {
 
     public ShortcutManager(Preferences prefs) {
         this.prefs = Objects.requireNonNull(prefs);
+        int mouseMods = prefs.getInt(NOTE_CLICK_MODIFIERS_PREF,
+                defaultNoteClickShortcut().modifiers());
+        boolean mouseEnabled = prefs.getBoolean(NOTE_CLICK_ENABLED_PREF, false);
+        try {
+            noteClickShortcut = new NoteClickShortcut(mouseEnabled, mouseMods);
+        } catch (IllegalArgumentException invalidPreferences) {
+            noteClickShortcut = defaultNoteClickShortcut();
+        }
         for (Definition d : DEFAULTS) {
             String stored = prefs.get(d.id(), null);
             KeyStroke parsed = null;
@@ -108,6 +140,12 @@ public final class ShortcutManager implements AutoCloseable {
         }
     }
 
+    public NoteClickShortcut getNoteClickShortcut() { return noteClickShortcut; }
+    public void setNoteClickShortcut(NoteClickShortcut shortcut) {
+        noteClickShortcut = Objects.requireNonNull(shortcut);
+        prefs.putBoolean(NOTE_CLICK_ENABLED_PREF, shortcut.enabled());
+        prefs.putInt(NOTE_CLICK_MODIFIERS_PREF, shortcut.modifiers());
+    }
     public static List<Definition> definitions() { return DEFAULTS; }
     public Map<String, KeyStroke> snapshot() { return new LinkedHashMap<>(bindings); }
     public static Map<String, KeyStroke> defaults() {
