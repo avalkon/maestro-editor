@@ -336,6 +336,11 @@ public final class NoteEditorApp {
             // solely because the baseline matches leaves a stale/blank editor.
             if(sameBaseline(doc,updated) && NoteEditorDelta.capture(doc).equals(deltas))return;
             NoteEditorDelta.Applied applied=NoteEditorDelta.apply(updated,deltas);
+            // A refresh may update headers, instruments, or add empty X: layers.
+            // When every existing source part has the same baseline and final
+            // notes, this is NOT a new editing session: keep its undo/redo.
+            // The old history is keyed by X:, so a different layer ordering is OK.
+            if (sameEditingContent(doc, updated)) updated.preserveHistoryFrom(doc);
             updated.markSaved();
             stopLocalPlayback();
             this.doc=updated;
@@ -360,6 +365,31 @@ public final class NoteEditorApp {
                         NoteEditorDelta.Value.of(b.baselineNotes.get(j))))return false;
             }
             return true;
+        }
+        private static boolean sameEditingContent(NoteDocument previous, NoteDocument updated) {
+            if (previous == null || previous.kind != updated.kind) return false;
+            java.util.Map<Integer,NoteDocument.Layer> current = new java.util.HashMap<>();
+            java.util.Map<Integer,NoteDocument.Layer> next = new java.util.HashMap<>();
+            for (NoteDocument.Layer layer: previous.layers)
+                if (current.put(layer.partNumber,layer) != null) return false;
+            for (NoteDocument.Layer layer: updated.layers)
+                if (next.put(layer.partNumber,layer) != null) return false;
+            for (var entry: current.entrySet()) {
+                NoteDocument.Layer old = entry.getValue(), now = next.get(entry.getKey());
+                if (now == null || old.measureTicks != now.measureTicks ||
+                    old.abcPitchShift != now.abcPitchShift ||
+                    !sameNotes(old.baselineNotes, now.baselineNotes) ||
+                    !sameNotes(old.notes, now.notes)) return false;
+            }
+            return true;
+        }
+        private static boolean sameNotes(java.util.List<EditableNote> a,
+                                         java.util.List<EditableNote> b) {
+            if (a.size() != b.size()) return false;
+            java.util.Map<NoteEditorDelta.Value,Integer> counts = new java.util.HashMap<>();
+            for (EditableNote n:a) counts.merge(NoteEditorDelta.Value.of(n),1,Integer::sum);
+            for (EditableNote n:b) counts.merge(NoteEditorDelta.Value.of(n),-1,Integer::sum);
+            return counts.values().stream().allMatch(count -> count == 0);
         }
         public java.util.Map<Integer,NoteEditorDelta.Part> getNoteDeltas(){
             return doc==null||kind!=NoteDocument.Kind.ABC?java.util.Map.of():NoteEditorDelta.capture(doc);
@@ -485,7 +515,14 @@ public final class NoteEditorApp {
                     bridge.changed(kind,doc);
                 }
                 doc.markSaved();
-            }catch(Exception ex){throw new IllegalStateException("Unable to stage piano-roll notes",ex);}
+            }catch(Exception ex){
+                java.util.logging.Logger.getLogger(NoteEditorApp.class.getName())
+                    .log(java.util.logging.Level.SEVERE, "Unable to stage piano-roll notes", ex);
+                // Show the real cause in the status/error report rather than only
+                // the outer wrapper, so rare Linux staging failures are actionable.
+                throw new IllegalStateException("Unable to stage piano-roll notes: " +
+                    ex.getClass().getSimpleName() + ": " + ex.getMessage(), ex);
+            }
         }
         private void refreshed(){
             if(doc==null)return;

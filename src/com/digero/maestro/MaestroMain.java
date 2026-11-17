@@ -101,7 +101,7 @@ public class MaestroMain {
 				} else if (arg.equals("-app-version")) {
 					System.out.println("App name: "+APP_NAME);
 					System.out.println("App version: "+APP_VERSION);
-					System.out.println("App authors: Digero, Aifel, Elamond and Karloman");
+					System.out.println("App authors: Digero, Aifel, Elamond, Karloman and Sinduriel");
 				}
 			}
 		}

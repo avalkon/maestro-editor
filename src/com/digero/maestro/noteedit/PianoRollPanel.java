@@ -381,6 +381,13 @@ public final class PianoRollPanel extends JComponent {
     private long measure(){return document.measureTicks(layerIndex);}
     private long gridTick(long index){return Math.max(0,Math.round(index * (double)measure()/snapDivisor));}
     private long snapped(long t){return gridTick(Math.round(t*snapDivisor/(double)measure()));}
+    /** Clicking anywhere inside a grid cell creates its note at the LEFT edge,
+     * rather than switching to the next cell at the halfway point. Use the
+     * unrounded mouse coordinate to avoid a half-tick boundary error. */
+    private long snappedNotePlacement(int pixelX) {
+        double tickPosition = Math.max(0, (pixelX - KEY_WIDTH) / scale());
+        return gridTick((long)Math.floor(tickPosition * snapDivisor / measure() + 1e-9));
+    }
     private long step(){return Math.max(1,Math.round(measure()/(double)snapDivisor));}
     private double scale(){return quarterWidth/(double)document.ppq;}
     private int x(long tick){return KEY_WIDTH+(int)Math.round(tick*scale());}
@@ -551,7 +558,7 @@ public final class PianoRollPanel extends JComponent {
     }
     private void add(MouseEvent e){
         if(document==null || hit(e.getPoint())!=null)return;
-        long start=snapped(tick(e.getX())),length=step();
+        long start=snappedNotePlacement(e.getX()),length=step();
         int channel=notes().isEmpty()?0:notes().getFirst().channel();
         EditableNote note=EditableNote.create(pitch(e.getY()),90,channel,start,start+length);
         document.edit(layerIndex,list->list.add(note));

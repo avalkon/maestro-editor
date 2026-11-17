@@ -118,7 +118,7 @@
 			<arg value="--description"/>
 			<arg value="ABC Player for the Lord of the Rings Online"/>
 			<arg value="--vendor"/>
-			<arg value="Elamond and Aifel"/>
+			<arg value="Elamond, Aifel and Sinduriel"/>
 			<arg value="--icon"/>
 			<arg value="abcplayer.ico"/>
 			<!--
@@ -159,7 +159,7 @@
 			<arg value="--description"/>
 			<arg value="ABC tools to merge abc files or auto export abc"/>
 			<arg value="--vendor"/>
-			<arg value="Aifel and Elamond"/>
+			<arg value="Aifel, Elamond and Sinduriel"/>
 			<arg value="--icon"/>
 			<arg value="abctools.ico"/>
 			<arg value="--java-options"/>
@@ -201,7 +201,7 @@
 			<arg value="--description"/>
 			<arg value="Maestro MIDI to ABC converter"/>
 			<arg value="--vendor"/>
-			<arg value="Aifel and Elamond"/>
+			<arg value="Aifel, Elamond and Sinduriel"/>
 			<arg value="--icon"/>
 			<arg value="maestro.ico"/>
 			<arg value="--java-options"/>

@@ -44,9 +44,9 @@ public final class InteractionSmokeTest {
             check(lute.notes.isEmpty()&&harp.notes.isEmpty(),"Multi-part delete");
             doc.undo();
             check(lute.notes.size()==1&&harp.notes.size()==2,"Atomic undo across parts");
-            // Add one note to the selected active track at nearest 1/3 MEASURE.
+            // Add one note at the left edge of the grid cell clicked (1/3 MEASURE).
             roll.setDocument(doc,0);roll.setSnapDivisor(3);
-            mouse(roll,MouseEvent.MOUSE_CLICKED,170,1035,0,2);
+            mouse(roll,MouseEvent.MOUSE_CLICKED,200,1035,0,2);
             check(lute.notes.size()==2,"Double-click add");
             EditableNote inserted=lute.notes.getLast();
             check(inserted.start()==1280&&inserted.end()==2560,"1/3 of 4/4 measure is 1280 ticks");
@@ -57,7 +57,7 @@ public final class InteractionSmokeTest {
             mouse(roll,MouseEvent.MOUSE_CLICKED,95,972,0,2);
             check(lute.notes.getLast().start()==320,"1/12 of 4/4 measure is 320 ticks");
             roll.setSnapDivisor(1);
-            mouse(roll,MouseEvent.MOUSE_CLICKED,390,935,0,2);
+            mouse(roll,MouseEvent.MOUSE_CLICKED,450,935,0,2);
             check(lute.notes.getLast().start()==3840 && lute.notes.getLast().end()==7680,
                 "1/1 measure should add a full bar");
             roll.setSnapDivisor(2);

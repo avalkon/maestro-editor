@@ -13,7 +13,7 @@
     <?define AbcToolsAppUserModelId=Aifel.AbcTools?>
     <?define ApplicationFolderName=Maestro?>
     <Product Id="*" UpgradeCode="{6AA5E0BF-7CA7-4D11-9687-28751293C91A}"
-            Name="Maestro and ABC Player" Manufacturer="Digero Aifel Elamond"
+            Name="Maestro and ABC Player" Manufacturer="Digero Aifel Elamond Sinduriel"
             Version="$(var.MaestroVersion)" Language="1033">
         <Package Id="*" Description="!(loc.Package_Description)" Languages="1033" Compressed="yes"
                  SummaryCodepage="1252" InstallScope="perUser" InstallPrivileges="limited"

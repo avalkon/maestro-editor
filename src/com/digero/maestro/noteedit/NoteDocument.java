@@ -41,7 +41,22 @@ public final class NoteDocument {
     private final Deque<State> undo = new ArrayDeque<>(), redo = new ArrayDeque<>();
     private boolean dirty;
 
-    private record State(List<List<EditableNote>> notes, List<Boolean> edited) {}
+    // ABC history is keyed by stable X: part identity, not the layer's current
+    // position. Preview regeneration and adding parts may reorder editor layers.
+    // MIDI uses negative keys so its source track indices remain distinct.
+    private record State(Map<Integer,List<EditableNote>> notes, Map<Integer,Boolean> edited) {}
+    private int historyKey(int index) {
+        return kind == Kind.ABC && layer(index).partNumber > 0
+                ? layer(index).partNumber : -index - 1;
+    }
+    /** Reuse history after a non-destructive generated ABC refresh. The caller
+     * verifies that the old part identities, baseline, and edited notes survive.
+     * New preview layers need not have existed when an older state was saved. */
+    void preserveHistoryFrom(NoteDocument previous) {
+        if (kind != previous.kind) throw new IllegalArgumentException("Document kind changed");
+        undo.addAll(previous.undo);
+        redo.addAll(previous.redo);
+    }
 
     NoteDocument(Kind kind, int ppq, float divisionType, File sourceFile) {
         this.kind = kind; this.ppq = ppq; this.divisionType = divisionType; this.sourceFile = sourceFile;
@@ -57,25 +72,26 @@ public final class NoteDocument {
     public boolean canUndo() { return !undo.isEmpty(); }
     public boolean canRedo() { return !redo.isEmpty(); }
     private State snapshot() {
-        List<List<EditableNote>> all = new ArrayList<>();
-        List<Boolean> edits = new ArrayList<>();
-        for (Layer layer : layers) {
-            all.add(new ArrayList<>(layer.notes));
-            edits.add(layer.edited);
+        Map<Integer,List<EditableNote>> all = new LinkedHashMap<>();
+        Map<Integer,Boolean> edits = new LinkedHashMap<>();
+        for (int i = 0; i < layers.size(); i++) {
+            Layer layer = layers.get(i);
+            int key = historyKey(i);
+            if (all.put(key, new ArrayList<>(layer.notes)) != null)
+                throw new IllegalStateException("Duplicate part identity: " + key);
+            edits.put(key, layer.edited);
         }
         return new State(all, edits);
     }
     private void restore(State state) {
         for (int i = 0; i < layers.size(); i++) {
             Layer layer = layers.get(i);
+            int key = historyKey(i);
             layer.notes.clear();
-            if (i < state.notes.size()) {
-                layer.notes.addAll(state.notes.get(i));
-                layer.edited = state.edited.get(i);
-            } else {
-                // This X: part was added after the saved undo snapshot.
-                layer.edited = false;
-            }
+            List<EditableNote> previous = state.notes.get(key);
+            if (previous != null) layer.notes.addAll(previous);
+            // A newly added part has no notes in an older undo snapshot.
+            layer.edited = state.edited.getOrDefault(key, false);
         }
         dirty = true;
     }

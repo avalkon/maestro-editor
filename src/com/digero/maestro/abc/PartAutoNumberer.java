@@ -470,6 +470,15 @@ public class PartAutoNumberer {
 	public void setInstrument(NumberedAbcPart partToChange, LotroInstrument newInstrument, List<? extends NumberedAbcPart> parts) {
 
 		if (newInstrument != partToChange.getInstrument()) {
+            // X: is an identity key for authored note deltas and routing in a
+            // native composition. Renumbering it on instrument changes silently
+            // assigns authored tracks to different parts (e.g. X:1 <-> X:11).
+            // Imported arrangements retain the existing auto-numbering behavior.
+            if (partToChange instanceof AbcPart abcPart &&
+                    abcPart.getAbcSong().isCompositionMode()) {
+                partToChange.setInstrument(newInstrument);
+                return;
+            }
 			if (partToChange.isPartNumberManuallyAssigned() || getFirstNumber(partToChange.getInstrument()) == getFirstNumber(newInstrument)) {
 				// Lets keep the part number, since it either has the same first number, or is locked
 				partToChange.setInstrument(newInstrument);

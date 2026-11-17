@@ -49,7 +49,8 @@ public final class AboutDialog {
 				+ "Created by Digero of Landroval.<br>" //
 				+ "Copyright &copy; 2015 Ben Howell.<br>" //
 				+ "Upgraded by Aifel of Meriadoc,<br>" //
-				+ "Elamond of Peregrin and Karloman.<br>" //
+				+ "Elamond of Peregrin, Karloman, and<br>" //
+				+ "Sinduriel of Sting.<br>" //
 				+ "<br>" //
 				+ "<a href='" + appUrl + "'>" + "wiki link" + "</a><br>" //
 				+ "<br>" //

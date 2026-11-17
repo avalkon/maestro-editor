@@ -1466,7 +1466,9 @@ public class AbcSong implements IDiscardable, AbcMetadataSource {
             removedCountIn = true;
         }
 		suppressPartSort = true;
-		partAutoNumberer.onPartDeleted(part, parts);
+        // Composition X: numbers are note/routing identities, never close a
+        // numbering gap behind a deleted part and reassign someone else's notes.
+        if (!compositionMode) partAutoNumberer.onPartDeleted(part, parts);
 		suppressPartSort = false;
 		part.discard();
 		//since we suppressed sorting we do it now:
