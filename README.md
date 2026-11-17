@@ -1,3 +1,10 @@
+<p align="center">
+<a href="https://github.com/avalkon/maestro-editor/releases"><img src="https://img.shields.io/github/downloads/avalkon/maestro-editor/total?label=Downloads" alt="Downloads" /></a>
+ <img src="https://img.shields.io/badge/Windows-supported-0078D6?logo=windows&logoColor=white" alt="Windows" />
+  <img src="https://img.shields.io/badge/Linux-supported-FCC624?logo=linux&logoColor=white" alt="Linux" />
+  <img src="https://img.shields.io/badge/macOS-supported-000000?logo=apple&logoColor=white" alt="macOS" />
+</p>
+
 # Maestro-Editor 4.7.7-B2 (Beta 2)
 
 This fork written and maintained by Sinduriel of The Feral Housewives (Sting)
@@ -6,10 +13,9 @@ For End Users:
 
 See [latest releases](https://github.com/avalkon/maestro-editor/releases)  for downloads.
 
-This beta combines Maestro 4.7.6-derived source with the integrated piano-roll
-updates and introduces **File → New ABC Composition**, with project-owned notes,
-LOTRO instrument parts, and preview-visible authored parts. Import-based export
-still omits empty tracks, as in upstream Maestro.
+Beta 2 combines Maestro 4.7.6-derived source with an integrated piano-roll and introduces 
+**File → New ABC Composition**, with project-owned notes,LotRO instrument parts, and 
+preview-visible authored parts. Import-based export still omits empty tracks, as in upstream Maestro.
 
 If you encounter any issues you can't figure out, please feel free to submit an 
 issue or contact me in-game, or find me through the official LotRO or Sting discords.
@@ -17,14 +23,11 @@ issue or contact me in-game, or find me through the official LotRO or Sting disc
 
 ## Known beta caveats
 
-- Original MIDI edits can be staged as snapshots but do not necessarily replace
-  Maestro's underlying conversion source.
 - ABC part delta rebasing after major arrangement changes can be imperfect.
 - Strict LOTRO exported ABC should be validated in ABC Player; keep backups.
-- Source history documents may reference earlier editor versions; those are
-  historical descriptions, not claims about the current 4.7.7-B2 version.
 
-See the editable 4.7.7-B1 User Manual (most sections remain applicable); see docs/NEW_ABC_COMPOSITION_B2.md for workflows, shortcuts, and limitations.
+
+See the User Manual for feature overviews, workflows, shortcuts, and limitations.
 
 ## Upstream project history
 
