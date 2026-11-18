@@ -59,7 +59,6 @@ are still playing in a different destination.
 
 ## Known beta caveats
 
-- ABC part delta rebasing after major arrangement changes can be imperfect.
 - Strict LOTRO exported ABC should be validated in ABC Player; keep backups.
 
 
