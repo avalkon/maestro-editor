@@ -176,13 +176,40 @@ public class AbcSong implements IDiscardable, AbcMetadataSource {
      * Missing entry means assigned to the originating part (legacy behavior). */
     private volatile Map<Integer,Set<Integer>> authoredTrackRouting = Map.of();
     public Map<Integer,Set<Integer>> getAuthoredTrackRouting() { return authoredTrackRouting; }
+    /** Compatibility helpers for callers treating imported sources as a group.
+     * Actual assignment state belongs to each individual AbcPart source track. */
+    public boolean isOriginalSourceEnabled(int partNumber) {
+        for (AbcPart part : parts)
+            if (part.getPartNumber() == partNumber) return part.getEnabledTrackCount() > 0;
+        return false;
+    }
+    public boolean isOriginalSourceOverridden(int partNumber) {
+        NoteEditorDelta.Part copy = getNoteEditorDeltas().get(partNumber);
+        return copy != null && copy.fullCopy() && !isOriginalSourceEnabled(partNumber);
+    }
+    public void setOriginalSourceEnabled(int partNumber, boolean enabled) {
+        for (AbcPart part : parts) if (part.getPartNumber() == partNumber)
+            for (int track = 0; track < part.getTrackCount(); track++)
+                if (part.isTrackConfigured(track)) part.setTrackEnabled(track, enabled);
+    }
+    /** Part numbers whose generated preview voices were genuinely rebuilt.
+     * An unselected authored copy must leave the original export metadata and
+     * its original sample-aware polyphony histogram intact. */
+    public Set<Integer> getEditedPreviewSourcePartNumbers() {
+        Set<Integer> changed=new LinkedHashSet<>();
+        for (var entry:getNoteEditorDeltas().entrySet())
+            if (!entry.getValue().fullCopy())
+                changed.add(entry.getKey());
+        return Collections.unmodifiableSet(changed);
+    }
     public void setAuthoredTrackRouting(Map<Integer,? extends Set<Integer>> routing) {
         authoredTrackRouting = AuthoredTrackRouting.copyOf(routing);
     }
     private Map<Integer,NoteEditorDelta.Part> routedNoteEditorDeltas() {
         Set<Integer> current = new LinkedHashSet<>();
         for (AbcPart part : parts) current.add(part.getPartNumber());
-        return AuthoredTrackRouting.forExport(getNoteEditorDeltas(),authoredTrackRouting,current);
+        // Full-copy originals are already filtered by normal per-track assignments.
+        return AuthoredTrackRouting.forExport(getNoteEditorDeltas(),authoredTrackRouting,current,Set.of());
     }
     /** v1.5.4 stored the written LOTRO note number rather than sounding pitch. */
     private boolean noteEditorDeltasLegacyPitch;
@@ -209,8 +236,19 @@ public class AbcSong implements IDiscardable, AbcMetadataSource {
         return noteEditorDeltas;
     }
     public synchronized void setNoteEditorDeltas(Map<Integer,NoteEditorDelta.Part> deltas) {
+        boolean hadAuthored = noteEditorDeltas.values().stream().anyMatch(p -> !p.added().isEmpty());
+        boolean hasAuthored = deltas.values().stream().anyMatch(p -> !p.added().isEmpty());
+        if (hadAuthored != hasAuthored) setMixDirty(true);
+        Set<Integer> newlyCopied = new LinkedHashSet<>();
+        for (var entry : deltas.entrySet()) {
+            NoteEditorDelta.Part old = noteEditorDeltas.get(entry.getKey());
+            if (entry.getValue().fullCopy() && (old == null || !old.fullCopy()))
+                newlyCopied.add(entry.getKey());
+        }
         this.noteEditorDeltas = Map.copyOf(deltas);
         this.noteEditorDeltasLegacyPitch = false;
+        // First edit defaults to authored only. Further staging must not reset assignments.
+        for (int source : newlyCopied) setOriginalSourceEnabled(source, false);
     }
     private String noteEditorMidiBase64 = null;
     public String getNoteEditorAbc() { return noteEditorAbc; }
@@ -650,6 +688,7 @@ public class AbcSong implements IDiscardable, AbcMetadataSource {
                 initialCompositionMeasures = Math.max(1,Math.min(2000,
                     SaveUtil.parseValue(compositionElement,"@measures",1)));
             }
+            Map<Integer,Boolean> legacyOriginalSelections = new LinkedHashMap<>();
             Element editorElement = XmlUtil.selectSingleElement(songEle, "noteEditor");
             if (editorElement != null) {
                 Element partSnapshot = XmlUtil.selectSingleElement(editorElement, "abc");
@@ -675,8 +714,9 @@ public class AbcSong implements IDiscardable, AbcMetadataSource {
                                 Long.parseLong(change.getAttribute("end")));
                             (name.equals("remove")?removed:added).add(note);
                         }
-                        if(!removed.isEmpty() || !added.isEmpty())
-                            deltas.put(partNo,new NoteEditorDelta.Part(removed,added));
+                        boolean fullCopy=Boolean.parseBoolean(el.getAttribute("fullCopy"));
+                        if(fullCopy || !removed.isEmpty() || !added.isEmpty())
+                            deltas.put(partNo,new NoteEditorDelta.Part(removed,added,fullCopy));
                     } catch(RuntimeException malformed) {
                         log.warning("Ignored invalid note editor delta in project file: " + malformed.getMessage());
                     }
@@ -698,6 +738,31 @@ public class AbcSong implements IDiscardable, AbcMetadataSource {
                     }
                 }
                 authoredTrackRouting = AuthoredTrackRouting.copyOf(routing);
+                if (!Boolean.parseBoolean(editorElement.getAttribute("perTrackImportedSelection"))) {
+                Map<Integer,Boolean> originalSelections = legacyOriginalSelections;
+                org.w3c.dom.NodeList originalNodes=editorElement.getElementsByTagName("importedSource");
+                for(int r=0;r<originalNodes.getLength();r++) {
+                    try {
+                        Element state=(Element)originalNodes.item(r);
+                        int source=Integer.parseInt(state.getAttribute("source"));
+                        if(source<1)continue;
+                        String enabled=state.getAttribute("enabled");
+                        if("true".equals(enabled)||"false".equals(enabled))
+                            originalSelections.put(source,Boolean.valueOf(enabled));
+                    } catch(RuntimeException malformed) {
+                        log.warning("Ignored invalid imported source selection: "+malformed.getMessage());
+                    }
+                }
+                // Previous full-copy MSX files didn't save the imported checkbox.
+                // Capture their on-load choice now, so the two routes are
+                // independent as soon as the project is opened.
+                for(var entry:deltas.entrySet()) {
+                    if(entry.getValue().fullCopy() && !originalSelections.containsKey(entry.getKey()))
+                        originalSelections.put(entry.getKey(),
+                            !AuthoredTrackRouting.targets(entry.getKey(),authoredTrackRouting)
+                                .contains(entry.getKey()));
+                }
+                }
 
                 noteEditorDeltasLegacyPitch = !"3".equals(editorElement.getAttribute("version"));
                 if (midiSnapshot != null) {
@@ -807,6 +872,11 @@ public class AbcSong implements IDiscardable, AbcMetadataSource {
 			handleTuneSections(songEle, fileVersion, file.getName());
 
 			loadPartsFromXML(songEle, fileVersion, sorted, warningHandler, file.getName());
+            // Migrate the old part-wide selection once, retaining source settings.
+            for (var entry : legacyOriginalSelections.entrySet())
+                if (!entry.getValue() && noteEditorDeltas.containsKey(entry.getKey())
+                    && noteEditorDeltas.get(entry.getKey()).fullCopy())
+                    setOriginalSourceEnabled(entry.getKey(), false);
 
 			Version def = new Version(0,0,0);
 			Version maestroVersion = SaveUtil.parseValue(songEle, "@maestroVersion", def);
@@ -1032,8 +1102,6 @@ public class AbcSong implements IDiscardable, AbcMetadataSource {
 		
 		if (tuneBars != null) {
 			for (TuneLine tuneLine : tuneBars.values()) {
-				assert tuneLine.startTick == -1L;
-				assert tuneLine.endTick == -1L;
 				
 				tuneLine.startTick = data.barFloatToTick(tuneLine.startBar);
 				tuneLine.endTick   = data.barFloatToTick(tuneLine.endBar);// don't use ceil() here
@@ -1250,9 +1318,11 @@ public class AbcSong implements IDiscardable, AbcMetadataSource {
         if (noteEditorAbc != null || noteEditorMidiBase64 != null || !noteEditorDeltas.isEmpty() || !authoredTrackRouting.isEmpty()) {
             Element editor = (Element) songEle.appendChild(doc.createElement("noteEditor"));
             editor.setAttribute("version", "3");
+            editor.setAttribute("perTrackImportedSelection", "true");
             for(var entry : getNoteEditorDeltas().entrySet()) {
                 Element part = (Element)editor.appendChild(doc.createElement("partDelta"));
                 part.setAttribute("number",Integer.toString(entry.getKey()));
+                if(entry.getValue().fullCopy()) part.setAttribute("fullCopy","true");
                 for(NoteEditorDelta.Value note : entry.getValue().removed())
                     appendEditorDelta(doc,part,"remove",note);
                 for(NoteEditorDelta.Value note : entry.getValue().added())
@@ -1587,19 +1657,29 @@ public class AbcSong implements IDiscardable, AbcMetadataSource {
         return new Pair<>(min, max);
     }
 
-	@Override
-	public int getActivePartCount() {
-		// TODO: Cache this to not have to recalculate
-		ListModelWrapper<AbcPart> prts = getParts();
-		int counter = 0;
-		for (AbcPart part : prts) {
-			if (part.getEnabledTrackCount() > 0) {
-				counter++;
-			}
-		}
-		return counter;
-	}
-	
+    /** Number of destinations with an active imported or authored assignment. */
+    @Override
+    public int getActivePartCount() {
+        Set<Integer> active = new HashSet<>();
+        for (AbcPart part : parts)
+            if (part.getEnabledTrackCount() > 0) active.add(part.getPartNumber());
+        Set<Integer> existing = new HashSet<>();
+        for (AbcPart part : parts) existing.add(part.getPartNumber());
+        for (var entry : getNoteEditorDeltas().entrySet()) {
+            if (!entry.getValue().added().isEmpty())
+                for (int destination : AuthoredTrackRouting.targets(entry.getKey(),authoredTrackRouting))
+                    if (existing.contains(destination)) active.add(destination);
+        }
+        return active.size();
+    }
+
+    public int getImportedActivePartCount() {
+        int count = 0;
+        for (AbcPart part : parts)
+            if (part.getEnabledTrackCount() > 0) count++;
+        return count;
+    }
+
 	public boolean isAnyPartsSoloed() {
 		for (AbcPart part : getParts()) {
 			if (part.isSoloed()) {
@@ -1666,11 +1746,17 @@ public class AbcSong implements IDiscardable, AbcMetadataSource {
 	}
 
 	public void setTranspose(int transpose) {
-		if (this.transpose != transpose) {
-			this.transpose = transpose;
-			fireChangeEvent(AbcSongProperty.TRANSPOSE);
-		}
-	}
+        if (this.transpose != transpose) {
+            // Generated MIDI is re-exported at the new pitch. Previously
+            // authored absolute-pitch deltas must follow that same change;
+            // update *both* removal anchors and authored additions so moving
+            // a source note does not duplicate it when the baseline changes.
+            if (!noteEditorDeltas.isEmpty())
+                rebaseAuthoredEffects(this.transpose, transpose, null, null);
+            this.transpose = transpose;
+            fireChangeEvent(AbcSongProperty.TRANSPOSE);
+        }
+    }
 
 	public KeySignature getKeySignature() {
 		if (ICompileConstants.SHOW_KEY_FIELD)
@@ -2148,11 +2234,176 @@ public class AbcSong implements IDiscardable, AbcMetadataSource {
         return str;
     }
 
-	public void tuneEdited() {
-		convertTunelinesToLongs();
-		setMixDirty(true); // Tempo might have changed, in which case the mixTimings need to be recomputed
-		fireChangeEvent(AbcSongProperty.TUNE_EDIT);
-	}
+    public void tuneEdited() { tuneEdited(null); }
+
+    /** Apply Tune Editor edits to existing piano-roll anchors and additions.
+     * The caller supplies the PREVIOUS tune sections (before its dialog
+     * replaced them), so the changes are incremental rather than cumulative. */
+    public void tuneEdited(java.util.NavigableMap<Float,TuneLine> previous) {
+        Map<Integer,NoteEditorDelta.Part> deltas = getNoteEditorDeltas();
+        // Construct the old timing and arrangement from a separate snapshot.
+        // The dialog has already installed the proposed sections, while the
+        // old section ticks are still available in its previous map.
+        AbcSong before = null;
+        if (!deltas.isEmpty()) {
+            before = new AbcSong(this);
+            before.tuneBars = previous == null ? null : new TreeMap<>(previous);
+            // Trim tick fields still describe the old settings until convert.
+            before.firstBar = firstBarTick < 0 ? null : (float)firstBarTick / sequenceInfo.getDataCache().getBarLengthTicks();
+            before.lastBar = lastBarTick < 0 ? null : (float)lastBarTick / sequenceInfo.getDataCache().getBarLengthTicks();
+        }
+        convertTunelinesToLongs();
+        setMixDirty(true);
+        if (before != null) {
+            try {
+                var oldExporter = before.getAbcExporter();
+                oldExporter.calcSongStartEndTicks();
+                var exporter = getAbcExporter();
+                exporter.calcSongStartEndTicks();
+                var oldMap = new AuthoredNoteTiming(oldExporter.getTimingInfo(), oldExporter.getExportStartTick());
+                boolean timingChanged = !getTuneTempoChanges(previous).equals(getTuneTempoChanges());
+                // A new trim origin must not clamp old stored notes to tick 0.
+                // Authored start/end trimming itself is not yet implemented.
+                long newOrigin = before.firstBarTick != firstBarTick || before.lastBarTick != lastBarTick
+                    ? oldExporter.getExportStartTick() : exporter.getExportStartTick();
+                var newMap = new AuthoredNoteTiming(exporter.getTimingInfo(), newOrigin);
+                if (timingChanged)
+                    deltas = promoteLegacyTuneCopies(before, deltas);
+                var rebased = rebaseAuthoredEffects(deltas, transpose, transpose, previous, tuneBars, oldMap,
+                    timingChanged ? newMap : null);
+                // Newly promoted copies keep the original tracks available but
+                // inactive, in accordance with the current independent-layer model.
+                setNoteEditorDeltas(rebased);
+            } catch (AbcConversionException | IOException ex) {
+                throw new IllegalStateException("Cannot update authored note timing: " + ex.getMessage(), ex);
+            }
+        }
+        fireChangeEvent(AbcSongProperty.TUNE_EDIT);
+    }
+
+    /** Older projects represent edits as additions AND deletions of individual
+     * generated notes. Regenerating the exporter at a new tempo may quantize,
+     * shorten or split those anchors, so a numerical warp cannot reliably
+     * identify them. Materialize the exact old final lane before changing its
+     * timing, using the same full-copy representation as new piano-roll edits.
+     * Never guess if the old delta is already unmatched or multi-routed in a
+     * way a single full copy cannot represent. */
+    private static Map<Integer,NoteEditorDelta.Part> promoteLegacyTuneCopies(
+            AbcSong before, Map<Integer,NoteEditorDelta.Part> deltas)
+            throws IOException, AbcConversionException {
+        Map<Integer,NoteEditorDelta.Part> removals = new LinkedHashMap<>();
+        for (var entry : deltas.entrySet()) {
+            var part = entry.getValue();
+            if (!part.fullCopy() && !part.removed().isEmpty())
+                removals.put(entry.getKey(), new NoteEditorDelta.Part(part.removed(), List.of()));
+        }
+        if (removals.isEmpty()) return deltas;
+        Path temp = Files.createTempFile("maestro-legacy-tune-", ".abc");
+        try {
+            before.exportGeneratedAbc(temp.toFile(), MaestroMain.APP_NAME);
+            var doc = com.digero.maestro.noteedit.AbcDocumentIO.readText(
+                before.addMissingEditorParts(Files.readString(temp)));
+            Map<Integer,com.digero.maestro.noteedit.NoteDocument.Layer> layers = new HashMap<>();
+            for (var layer : doc.layers) layers.put(layer.partNumber, layer);
+            for (int source : removals.keySet())
+                if (!layers.containsKey(source)) throw new IOException("Missing legacy source X:" + source);
+            var applied = NoteEditorDelta.apply(doc, removals);
+            if (applied.unmatchedRemovals() != 0)
+                throw new IOException("Legacy piano-roll edits have " + applied.unmatchedRemovals() +
+                    " unmatched removals. Review those edits before changing tempo.");
+            Map<Integer,NoteEditorDelta.Part> promoted = new LinkedHashMap<>(deltas);
+            for (int source : removals.keySet()) {
+                var layer = layers.get(source);
+                var destinations = AuthoredTrackRouting.targets(source, before.getAuthoredTrackRouting());
+                if (!layer.notes.isEmpty() && !destinations.equals(Set.of(source)))
+                    throw new IOException("Legacy X:" + source + " has remaining imported notes and separately routed edits. " +
+                        "Convert it to a full authored copy before changing tempo.");
+                List<NoteEditorDelta.Value> notes = new ArrayList<>();
+                for (var note : layer.notes) notes.add(NoteEditorDelta.Value.of(note));
+                notes.addAll(deltas.get(source).added());
+                notes.sort(Comparator.comparingLong(NoteEditorDelta.Value::start).thenComparingInt(NoteEditorDelta.Value::pitch));
+                promoted.put(source, new NoteEditorDelta.Part(
+                    layer.baselineNotes.stream().map(NoteEditorDelta.Value::of).toList(), notes, true));
+            }
+            return promoted;
+        } finally { Files.deleteIfExists(temp); }
+    }
+
+    private static int tunePitchAt(java.util.NavigableMap<Float,TuneLine> bars, long tick) {
+        if (bars != null) for (TuneLine line: bars.values())
+            if (tick >= line.startTick && tick < line.endTick) return line.seminoteStep;
+        return 0;
+    }
+    private static int tuneFadeAt(java.util.NavigableMap<Float,TuneLine> bars, long tick) {
+        if (bars != null) for (TuneLine line: bars.values()) {
+            if (tick < line.startTick || tick >= line.endTick) continue;
+            long duration = Math.max(1L,line.endTick-line.startTick);
+            double position = Math.max(0.0,Math.min(1.0,
+                (tick-line.startTick)/(double)duration));
+            int percentage = line.fade >= 0
+                ? (int)Math.round(100-line.fade*position)
+                : (int)Math.round(100+line.fade*(1-position));
+            return Math.max(0,Math.min(100,percentage));
+        }
+        return 100;
+    }
+    private void rebaseAuthoredEffects(int previousTranspose, int nextTranspose,
+                    java.util.NavigableMap<Float,TuneLine> previousTune,
+                    java.util.NavigableMap<Float,TuneLine> nextTune) {
+        noteEditorDeltas = rebaseAuthoredEffects(getNoteEditorDeltas(), previousTranspose, nextTranspose,
+            previousTune, nextTune, null, null);
+    }
+    private Map<Integer,NoteEditorDelta.Part> rebaseAuthoredEffects(Map<Integer,NoteEditorDelta.Part> deltas,
+                    int previousTranspose, int nextTranspose,
+                    java.util.NavigableMap<Float,TuneLine> previousTune,
+                    java.util.NavigableMap<Float,TuneLine> nextTune,
+                    AuthoredNoteTiming oldMap, AuthoredNoteTiming newMap) {
+        int sourcePpq = sequenceInfo == null ?
+            com.digero.maestro.noteedit.AbcDocumentIO.PPQ : sequenceInfo.getSequence().getResolution();
+        java.util.Map<Integer,com.digero.maestro.noteedit.NoteEditorDelta.Part> changed =
+            new java.util.LinkedHashMap<>();
+        for (var entry:deltas.entrySet()) {
+            java.util.List<com.digero.maestro.noteedit.NoteEditorDelta.Value> removed =
+                new java.util.ArrayList<>();
+            java.util.List<com.digero.maestro.noteedit.NoteEditorDelta.Value> added =
+                new java.util.ArrayList<>();
+            for (var note:entry.getValue().removed())
+                removed.add(rebaseAuthoredValue(note,previousTranspose,nextTranspose,
+                    previousTune,nextTune,sourcePpq,oldMap,newMap));
+            for (var note:entry.getValue().added())
+                added.add(rebaseAuthoredValue(note,previousTranspose,nextTranspose,
+                    previousTune,nextTune,sourcePpq,oldMap,newMap));
+            changed.put(entry.getKey(), new com.digero.maestro.noteedit.NoteEditorDelta.Part(
+                removed,added,entry.getValue().fullCopy()));
+        }
+        return java.util.Map.copyOf(changed);
+    }
+    private static com.digero.maestro.noteedit.NoteEditorDelta.Value rebaseAuthoredValue(
+            com.digero.maestro.noteedit.NoteEditorDelta.Value note,
+            int previousTranspose,int nextTranspose,
+            java.util.NavigableMap<Float,TuneLine> previousTune,
+            java.util.NavigableMap<Float,TuneLine> nextTune,int sourcePpq,
+            AuthoredNoteTiming oldMap, AuthoredNoteTiming newMap) {
+        double musicalStart = oldMap == null ? note.start() * sourcePpq / (double)
+            com.digero.maestro.noteedit.AbcDocumentIO.PPQ : oldMap.toSourceTick(note.start());
+        long tick = Math.round(musicalStart);
+        int delta = nextTranspose - previousTranspose +
+            tunePitchAt(nextTune,tick) - tunePitchAt(previousTune,tick);
+        int pitch = note.pitch() + delta;
+        if (pitch < 0 || pitch > 127) {
+            // Never discard an out-of-range authored note from the MSX.
+            log.warning("Cannot transpose authored note outside MIDI pitch range: " + pitch);
+            pitch = note.pitch();
+        }
+        int oldFade=tuneFadeAt(previousTune,tick), newFade=tuneFadeAt(nextTune,tick);
+        int velocity=note.velocity();
+        if (oldFade != newFade && oldFade > 0)
+            velocity=Math.max(1,Math.min(127,Math.round(velocity*newFade/(float)oldFade)));
+        long start = newMap == null ? note.start() : newMap.toEditorTick(musicalStart);
+        long end = newMap == null ? note.end() : newMap.toEditorTick(oldMap.toSourceTick(note.end()));
+        return new com.digero.maestro.noteedit.NoteEditorDelta.Value(
+            pitch,velocity,start,Math.max(start+1,end));
+    }
 
 	public int getTuneTranspose(long tickStart) {
 		if (tuneBars == null || tuneBars.isEmpty()) return 0;
@@ -2167,7 +2418,9 @@ public class AbcSong implements IDiscardable, AbcMetadataSource {
 	}
 	
 	public NavigableMap<Long, Integer> getTuneTempoChanges() {
-		SortedMap<Float, TuneLine> tree = tuneBars;
+        return getTuneTempoChanges(tuneBars);
+    }
+    private static NavigableMap<Long, Integer> getTuneTempoChanges(NavigableMap<Float, TuneLine> tree) {
 		TreeMap<Long, Integer> treeChanges = new TreeMap<>();
 		if (tree != null) {
 			Collection<TuneLine> lines = tree.values();

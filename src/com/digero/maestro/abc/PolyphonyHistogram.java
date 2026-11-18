@@ -43,6 +43,7 @@ public class PolyphonyHistogram   {
     private double average = 0;
     private int maxAll = 0;
     private long peakTick = 0L;
+    private long peakMicros = 0L;
 	public final static int LOTRO_MAX = 64;
 
 	public static boolean enabled = true;// set to true to enable this system, set to false to save cpu power.
@@ -405,6 +406,7 @@ public class PolyphonyHistogram   {
         average = 0.0d;
         maxAll = 0;
         peakTick = 0L;
+        peakMicros = 0L;
 		Set<Long> partSet = new HashSet<>(histogramData.keySet());
 		List<TreeMap<Long, Triple<Long,Integer,Long>>> treeList = new ArrayList<>();
         List<TreeMap<Long, Triple<Long,Integer,Long>>> treeListMuted = new ArrayList<>();
@@ -448,6 +450,7 @@ public class PolyphonyHistogram   {
 			if (polyphony > max) {
 				max = polyphony;
                 peakTick = entry.getValue().first;
+                peakMicros = entry.getKey();
 			}
 		}
 		assert polyphony == 0;
@@ -598,6 +601,9 @@ public class PolyphonyHistogram   {
         if (!enabled) return 0;
         return maxAll;
     }
+
+    /** Position of the maximum in ABC audio time, independent of source MIDI ticks. */
+    public long getPeakMicros() { return peakMicros; }
 
     public long getPeakTick() {
         if (!enabled) return 0L;

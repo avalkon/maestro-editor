@@ -334,7 +334,7 @@ public final class NoteEditorApp {
             // overrides have changed (for example after reopening, rerouting,
             // or editing a second part). Compare final deltas as well: skipping
             // solely because the baseline matches leaves a stale/blank editor.
-            if(sameBaseline(doc,updated) && NoteEditorDelta.capture(doc).equals(deltas))return;
+            if(sameBaseline(doc,updated) && NoteEditorDelta.capturePreservingMissing(doc,deltas).equals(deltas))return;
             NoteEditorDelta.Applied applied=NoteEditorDelta.apply(updated,deltas);
             // A refresh may update headers, instruments, or add empty X: layers.
             // When every existing source part has the same baseline and final

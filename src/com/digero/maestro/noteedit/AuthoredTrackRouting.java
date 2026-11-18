@@ -46,13 +46,32 @@ public final class AuthoredTrackRouting {
         Map<Integer,NoteEditorDelta.Part> deltas,
         Map<Integer,? extends Set<Integer>> routes,
         Set<Integer> existingParts) {
+        Set<Integer> suppressed=new LinkedHashSet<>();
+        for(var entry:deltas.entrySet())
+            if(!entry.getValue().fullCopy() || targets(entry.getKey(),routes).contains(entry.getKey()))
+                suppressed.add(entry.getKey());
+        return forExport(deltas,routes,existingParts,suppressed);
+    }
+
+    /** Suppression of the imported original is independent of the authored
+     * destinations. This permits original only, authored only, both, or neither. */
+    public static Map<Integer,NoteEditorDelta.Part> forExport(
+        Map<Integer,NoteEditorDelta.Part> deltas,
+        Map<Integer,? extends Set<Integer>> routes,
+        Set<Integer> existingParts,
+        Set<Integer> suppressedOriginalSources) {
         Map<Integer,List<NoteEditorDelta.Value>> removals = new LinkedHashMap<>();
         Map<Integer,List<NoteEditorDelta.Value>> additions = new LinkedHashMap<>();
+        Set<Integer> replacedSources = new LinkedHashSet<>();
         for (var entry : deltas.entrySet()) {
             int source = entry.getKey();
-            if (existingParts.contains(source))
+            Set<Integer> destinations=targets(source,routes);
+            if (existingParts.contains(source) &&
+                    (!entry.getValue().fullCopy() || suppressedOriginalSources.contains(source))) {
                 removals.computeIfAbsent(source,k->new ArrayList<>()).addAll(entry.getValue().removed());
-            for (int target : targets(source,routes)) {
+                if (entry.getValue().fullCopy()) replacedSources.add(source);
+            }
+            for (int target : destinations) {
                 if (existingParts.contains(target))
                     additions.computeIfAbsent(target,k->new ArrayList<>()).addAll(entry.getValue().added());
             }
@@ -62,7 +81,7 @@ public final class AuthoredTrackRouting {
         keys.addAll(additions.keySet());
         for (int key : keys) {
             var part = new NoteEditorDelta.Part(removals.getOrDefault(key,List.of()),
-                                                 additions.getOrDefault(key,List.of()));
+                            additions.getOrDefault(key,List.of()),replacedSources.contains(key));
             if (!part.empty()) result.put(key,part);
         }
         return Collections.unmodifiableMap(result);

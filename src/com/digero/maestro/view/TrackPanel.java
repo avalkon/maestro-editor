@@ -192,11 +192,12 @@ public class TrackPanel extends JPanel implements IDiscardable, TableLayoutConst
 			}
 		};
 		enableTrackCheckBox.setOpaque(false);
-		enableTrackCheckBox.setSelected(abcPart.isTrackEnabled(trackInfo.getTrackNumber()));
+		enableTrackCheckBox.setSelected(isImportedTrackEffectivelySelected());
 
 		enableTrackCheckBox.addActionListener(e -> {
 			int track = trackInfo.getTrackNumber();
 			boolean enabled = enableTrackCheckBox.isSelected();
+
 			abcPart.setTrackEnabled(track, enabled);
 			if (MUTE_DISABLED_TRACKS)
 				seq.setTrackMute(track, !enabled);
@@ -679,6 +680,7 @@ public class TrackPanel extends JPanel implements IDiscardable, TableLayoutConst
 	public void setAbcPreviewMode(boolean isAbcPreviewMode) {
 		if (this.isAbcPreviewMode != isAbcPreviewMode) {
 			this.isAbcPreviewMode = isAbcPreviewMode;
+            updateState();
 			updateColors();
 			for (Component child : getComponents()) {
 				if (child instanceof DrumPanel) {
@@ -808,10 +810,18 @@ public class TrackPanel extends JPanel implements IDiscardable, TableLayoutConst
 		}
 	}
 
+    private boolean isImportedTrackEffectivelySelected() {
+        return abcPart.isTrackEnabled(trackInfo.getTrackNumber());
+    }
+    public void refreshImportedRoutingAppearance() {
+        updateState();
+        updateColors();
+    }
+
 	private void updateColors() {
 		boolean abcPreviewMode = isAbcPreviewMode();
 		int trackNumber = trackInfo.getTrackNumber();
-		boolean trackEnabled = abcPart.isTrackEnabled(trackNumber);
+		boolean trackEnabled = isImportedTrackEffectivelySelected();
 		boolean trackEnabledOtherPart = trackEnabled;
 
 		boolean trackActive;
@@ -840,10 +850,13 @@ public class TrackPanel extends JPanel implements IDiscardable, TableLayoutConst
 				}
 
 				if (abcPreviewMode) {
-					if (abcSequencer.isTrackActive(part.getPreviewSequenceTrackNumber()))
-						trackActive = true;
-					if (abcSequencer.getTrackSolo(part.getPreviewSequenceTrackNumber()))
-						trackSolo = true;
+					int preview = part.getPreviewSequenceTrackNumber();
+                    if (preview >= 0 && abcSequencer.getSequence() != null &&
+                        preview < abcSequencer.getSequence().getTracks().length &&
+                        part.getAuthoredPreviewTracks().stream().noneMatch(t -> t.trackNumber == preview)) {
+                        if (abcSequencer.isTrackActive(preview)) trackActive = true;
+                        if (abcSequencer.getTrackSolo(preview)) trackSolo = true;
+                    }
 				}
 			}
 		}
@@ -881,7 +894,7 @@ public class TrackPanel extends JPanel implements IDiscardable, TableLayoutConst
 		if (trackEnabled && trackActive) {
 			noteGraph.setNoteColor(ColorTable.NOTE_ENABLED);
 			noteGraph.setBadNoteColor(ColorTable.NOTE_BAD_ENABLED);
-		} else if (!trackActive) {
+		} else if (!trackActive || (abcPreviewMode && !trackEnabledOtherPart)) {
 			noteGraph.setNoteColor(ColorTable.NOTE_OFF);
 			noteGraph.setBadNoteColor(ColorTable.NOTE_BAD_OFF);
 		} else // disabled (lighter colored) notes for playing tracks not in the current part
@@ -919,7 +932,7 @@ public class TrackPanel extends JPanel implements IDiscardable, TableLayoutConst
 	private void updateState() {
 		updateColors();
 
-		boolean trackEnabled = abcPart.isTrackEnabled(trackInfo.getTrackNumber());
+		boolean trackEnabled = isImportedTrackEffectivelySelected();
 		boolean priorityEnabled = isPriorityEnabled();
 		enableTrackCheckBox.setSelected(trackEnabled);
 

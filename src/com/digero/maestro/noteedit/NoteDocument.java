@@ -54,8 +54,37 @@ public final class NoteDocument {
      * New preview layers need not have existed when an older state was saved. */
     void preserveHistoryFrom(NoteDocument previous) {
         if (kind != previous.kind) throw new IllegalArgumentException("Document kind changed");
+        // A fresh ABC parse gives every note a new UUID. Undo snapshots from
+        // the previous editor document still refer to the old UUIDs, while
+        // note-delta capture must now distinguish individual moved notes.
+        // Reattach the original UUIDs before reusing the snapshots. The caller
+        // has already verified that the baseline and edited note multisets
+        // are identical, so this only preserves identity, not musical data.
+        if (kind == Kind.ABC) {
+            Map<Integer,Layer> previousLayers=new HashMap<>();
+            for(Layer old:previous.layers) previousLayers.put(old.partNumber,old);
+            for(Layer now:layers) {
+                Layer old=previousLayers.get(now.partNumber);
+                if(old==null) continue;
+                adoptIds(old.baselineNotes,now.baselineNotes);
+                adoptIds(old.notes,now.notes);
+            }
+        }
         undo.addAll(previous.undo);
         redo.addAll(previous.redo);
+    }
+    private static void adoptIds(List<EditableNote> previous, List<EditableNote> regenerated) {
+        Map<NoteEditorDelta.Value,Deque<UUID>> ids=new HashMap<>();
+        for(EditableNote n:previous) ids.computeIfAbsent(NoteEditorDelta.Value.of(n),
+            k->new ArrayDeque<>()).addLast(n.id());
+        for(int i=0;i<regenerated.size();i++) {
+            EditableNote n=regenerated.get(i);
+            Deque<UUID> matching=ids.get(NoteEditorDelta.Value.of(n));
+            if(matching==null || matching.isEmpty())
+                throw new IllegalStateException("Cannot preserve edited note identity");
+            regenerated.set(i,new EditableNote(matching.removeFirst(),n.pitch(),n.velocity(),
+                n.channel(),n.start(),n.end()));
+        }
     }
 
     NoteDocument(Kind kind, int ppq, float divisionType, File sourceFile) {

@@ -104,7 +104,12 @@ public class HistogramPanel extends JPanel implements IDiscardable, TableLayoutC
 		gutter.setOpaque(true);
 		gutter.setBackground(ColorTable.PANEL_HIGHLIGHT_OTHER_PART.get());
 
-		this.histoGraph = new HistogramNoteGraph(sequenceInfo, sequencer);
+        // If only authored tracks are playable, the original source might
+        // contain just a one-bar scaffold. The preview is the only meaningful
+        // timeline for the polyphony graph in that case.
+        this.histoGraph = new HistogramNoteGraph(sequenceInfo,
+                abcSong.hasAuthoredPartNotes() && abcSong.getImportedActivePartCount() == 0
+                    ? abcSequencer : sequencer);
 		histoGraph.setBackground(ColorTable.NOTE_POLYPHONY_BACKGROUND.get());
 		histoGraph.setPreferredSize(new Dimension(histoGraph.getPreferredSize().width, getPreferredSize().height));
 		histoGraph.setBorder(BorderFactory.createMatteBorder(0, 0, 1, 0, ColorTable.PANEL_BORDER_HORIZ.get()));
@@ -124,8 +129,10 @@ public class HistogramPanel extends JPanel implements IDiscardable, TableLayoutC
         peakButton.setToolTipText(UIText.get("maestro.polyphony.jump.to.highest.peak"));
         peakButton.addActionListener(a -> {
             if (histogram != null) {
-                long tick = histogram.getPeakTick();
-                sequencer.setTickPosition(tick);
+                long tick = abcSequencer.microsToTick(histogram.getPeakMicros());
+                // The histogram is in ABC preview coordinates. Seeking the
+                // original source sequencer sent authored-only songs to bar 1.
+                abcSequencer.setTickPosition(tick);
             }
         });
 		
@@ -362,12 +369,17 @@ public class HistogramPanel extends JPanel implements IDiscardable, TableLayoutC
             return b.toString();
         }
 
+        private boolean usesPreviewTimeline() { return this.sequencer == abcSequencer; }
+        private long histogramTick(long abcMicros, long sourceTick) {
+            return usesPreviewTimeline() ? abcSequencer.microsToTick(abcMicros) : sourceTick;
+        }
+
 		private void recalcPolyphonyEvents() {
 			// Underlying events list is being rebuilt; the note render cache must follow.
 			invalidateNoteCache();
 			// Make fake note events for every count event
 			events = new ArrayList<>();
-			if (abcSong.getQTM() == null) return;
+			if (abcSong == null) return; // Authored-only compositions need no source QTM
 			
 			Entry<Long, Pair<Long,Integer>> prevEvent = null;
 
@@ -384,7 +396,13 @@ public class HistogramPanel extends JPanel implements IDiscardable, TableLayoutC
                     if (prevEvent != null) {
                         //assert prevTick >= event.getValue().first : "OOPS HISTO";
                         int id = Math.min(CLIP_MAX_NOTES, prevEvent.getValue().second);
-                        events.add(new FakeNoteEvent(Note.fromId(id), prevEvent.getValue().first, event.getValue().first, dataCache));
+                        events.add(new FakeNoteEvent(Note.fromId(id),
+                                histogramTick(prevEvent.getKey(),prevEvent.getValue().first),
+                                histogramTick(event.getKey(),event.getValue().first),
+                                usesPreviewTimeline() ? new com.digero.common.midi.ITempoCache() {
+                                    public long tickToMicros(long tick) { return abcSequencer.tickToMicros(tick); }
+                                    public long microsToTick(long micros) { return abcSequencer.microsToTick(micros); }
+                                } : dataCache));
                     }
                     prevEvent = event;
                     prevTick = event.getValue().first;
@@ -394,10 +412,18 @@ public class HistogramPanel extends JPanel implements IDiscardable, TableLayoutC
 			if (prevEvent != null) {
 				int id = Math.min(CLIP_MAX_NOTES,prevEvent.getValue().second);
 				events.add(
-						new FakeNoteEvent(Note.fromId(id), prevEvent.getValue().first, dataCache.getSongLengthTicks(), dataCache));
+						new FakeNoteEvent(Note.fromId(id),
+                                histogramTick(prevEvent.getKey(),prevEvent.getValue().first),
+                                usesPreviewTimeline() ? abcSequencer.getTickLength() : dataCache.getSongLengthTicks(),
+                                usesPreviewTimeline() ? new com.digero.common.midi.ITempoCache() {
+                                    public long tickToMicros(long tick) { return abcSequencer.tickToMicros(tick); }
+                                    public long microsToTick(long micros) { return abcSequencer.microsToTick(micros); }
+                                } : dataCache));
 			} else {
 				int id = 0;
-				events.add(new FakeNoteEvent(Note.fromId(id), 0, dataCache.getSongLengthTicks(), dataCache));
+				events.add(new FakeNoteEvent(Note.fromId(id), 0,
+                                usesPreviewTimeline() ? abcSequencer.getTickLength() : dataCache.getSongLengthTicks(),
+                                dataCache));
 			}
 		}
 		

@@ -39,41 +39,38 @@ public final class NoteEditorPreviewOverlay {
             // Added notes become independent preview tracks below, instead of
             // being hidden inside the existing part's generated track.
             Map<Integer,NoteEditorDelta.Part> removals=new LinkedHashMap<>();
-            for (var entry:deltas.entrySet())
-                removals.put(entry.getKey(),new NoteEditorDelta.Part(entry.getValue().removed(),List.of()));
+            for (var entry:deltas.entrySet()) {
+                var change=entry.getValue();
+                // Full copies are independent layers; the exporter has already
+                // respected each original source track's assignment.
+                if (!change.fullCopy())
+                    removals.put(entry.getKey(),new NoteEditorDelta.Part(
+                        change.removed(),List.of(),false));
+            }
             NoteEditorDelta.Applied applied=NoteEditorDelta.apply(doc,removals);
             if(applied.unmatchedRemovals()!=0)
                 LOG.warning("Piano roll preview: "+applied.unmatchedRemovals()+" original notes no longer match generated part(s)");
             Sequence sequence=info.getSequence();
+            AuthoredNoteTiming mapping = new AuthoredNoteTiming(exporter.getTimingInfo(), exporter.getExportStartTick());
             Set<Integer> presented=new HashSet<>();
             for(AbcExporter.ExportTrackInfo trackInfo: info.getLastTrackInfos()) {
                 presented.add(trackInfo.part.getPartNumber());
                 NoteEditorDelta.Part change=deltas.get(trackInfo.part.getPartNumber());
-                if(change==null || change.empty())continue;
+                if(change==null || change.empty() || change.fullCopy())continue;
                 NoteDocument.Layer layer=null;
                 for(NoteDocument.Layer candidate:doc.layers)if(candidate.partNumber==trackInfo.part.getPartNumber()) {
                     layer=candidate;break;
                 }
                 if(layer==null || trackInfo.trackNumber>=sequence.getTracks().length)continue;
                 Track track=sequence.getTracks()[trackInfo.trackNumber];
-                long firstMidi=Long.MAX_VALUE;
-                for(int i=0;i<track.size();i++) {
-                    MidiEvent event=track.get(i);
-                    if(event.getMessage() instanceof ShortMessage m && m.getCommand()==ShortMessage.NOTE_ON && m.getData2()>0)
-                        firstMidi=Math.min(firstMidi,event.getTick());
-                }
-                long firstAbc=layer.baselineNotes.stream().mapToLong(EditableNote::start).min().orElse(0);
-                double ratio=sequence.getResolution()/(double)doc.ppq;
-                long origin=firstMidi==Long.MAX_VALUE? exporter.getExportStartTick():
-                            firstMidi - Math.round(firstAbc*ratio);
                 int pitchAdjustment=lotroInstruments?-layer.abcPitchShift:0;
                 List<EditableNote> playable = playableNotes(layer);
-                replaceNotes(track,playable,trackInfo.channel,pitchAdjustment,origin,ratio);
+                replaceNotes(track,playable,trackInfo.channel,pitchAdjustment,mapping);
                 if(trackInfo.noteEvents!=null) {
                     try {
                         trackInfo.noteEvents.clear();
                         trackInfo.noteEvents.addAll(toGraphEvents(playable,layer.abcPitchShift,
-                            origin,ratio,exporter));
+                            mapping,exporter));
                     } catch(UnsupportedOperationException immutable) {
                         LOG.warning("Cannot update immutable ABC preview graph for part " +
                             trackInfo.part.getPartNumber());
@@ -104,11 +101,12 @@ public final class NoteEditorPreviewOverlay {
                         if(AbcDocumentIO.isPlayableForExport(layer,note)) additions.add(note);
                     }
                     if(!additions.isEmpty())
-                        appendAuthoredTrack(info,exporter,part,layer,sourceNumber,additions,lotroInstruments);
+                        appendAuthoredTrack(info,exporter,part,layer,sourceNumber,additions,lotroInstruments,mapping);
                 }
             }
             if (song.isCompositionMode())
                 extendCompositionTimeline(info.getSequence(),song,exporter);
+            if (song.hasAuthoredPartNotes()) exporter.refreshAuthoredPreviewTempos(sequence);
         } catch(Exception ex) {
             // An invalid editor override must be diagnosed, not silently crash Maestro.
             LOG.log(Level.WARNING,"Could not synchronize edited ABC preview notes; generated preview retained",ex);
@@ -121,7 +119,7 @@ public final class NoteEditorPreviewOverlay {
 
     private static void appendAuthoredTrack(SequenceInfo info,AbcExporter exporter,AbcPart part,
                                             NoteDocument.Layer layer,int sourcePartNumber,
-                                            List<EditableNote> notes,boolean lotro) throws Exception {
+                                            List<EditableNote> notes,boolean lotro,AuthoredNoteTiming mapping) throws Exception {
         Sequence seq=info.getSequence();
         // An entirely blank composition produces a Sequence with no tracks.
         // Add metadata/tempo before adding authored note tracks.
@@ -164,7 +162,6 @@ public final class NoteEditorPreviewOverlay {
         track.add(new MidiEvent(new ShortMessage(ShortMessage.PROGRAM_CHANGE,channel,program,0),0));
         track.add(new MidiEvent(new ShortMessage(ShortMessage.CONTROL_CHANGE,channel,7,127),0));
         track.add(new MidiEvent(new ShortMessage(ShortMessage.CONTROL_CHANGE,channel,10,64),0));
-        double ratio=seq.getResolution()/(double)AbcDocumentIO.PPQ;
         long origin=Math.max(0,exporter.getExportStartTick());
         int shift=part.getInstrument().octaveDelta*12;
         java.util.List<AbcNoteEvent> events=new ArrayList<>();
@@ -173,8 +170,8 @@ public final class NoteEditorPreviewOverlay {
             int written=note.pitch()-shift;
             int playPitch=lotro?written:note.pitch();
             if(playPitch<0 || playPitch>127)continue;
-            long start=Math.max(0,origin+Math.round(note.start()*ratio));
-            long end=Math.max(start+1,origin+Math.round(note.end()*ratio));
+            long start=mapping.toPreviewTick(note.start());
+            long end=Math.max(start+1,mapping.toPreviewTick(note.end()));
             track.add(new MidiEvent(new ShortMessage(ShortMessage.NOTE_ON,channel,playPitch,note.velocity()),start));
             track.add(new MidiEvent(new ShortMessage(ShortMessage.NOTE_OFF,channel,playPitch,0),end));
             Note modelPitch=Note.fromId(written);
@@ -207,14 +204,14 @@ public final class NoteEditorPreviewOverlay {
     }
 
     private static List<AbcNoteEvent> toGraphEvents(List<EditableNote> notes,int shift,
-            long origin,double ratio,AbcExporter exporter) {
+            AuthoredNoteTiming mapping,AbcExporter exporter) {
         List<AbcNoteEvent> events=new ArrayList<>();
         for(EditableNote note:notes) {
             int written=note.pitch()-shift;
             Note pitch=Note.fromId(written);
             if(pitch==null)continue;
-            long start=Math.max(0,origin+Math.round(note.start()*ratio));
-            long end=Math.max(start+1,origin+Math.round(note.end()*ratio));
+            long start=mapping.toPreviewTick(note.start());
+            long end=Math.max(start+1,mapping.toPreviewTick(note.end()));
             events.add(new AbcNoteEvent(pitch,note.velocity(),start,end,
                 exporter.getTimingInfo(),null));
         }
@@ -222,7 +219,7 @@ public final class NoteEditorPreviewOverlay {
         return events;
     }
 
-    private static void replaceNotes(Track track,List<EditableNote> notes,int channel,int octave,long origin,double ratio)
+    private static void replaceNotes(Track track,List<EditableNote> notes,int channel,int octave,AuthoredNoteTiming mapping)
             throws InvalidMidiDataException {
         for(int i=track.size()-1;i>=0;i--) {
             MidiEvent event=track.get(i);
@@ -233,8 +230,8 @@ public final class NoteEditorPreviewOverlay {
         for(EditableNote note:notes) {
             int pitch=note.pitch()+octave;
             if(pitch<0 || pitch>127)continue;
-            long start=Math.max(0,origin+Math.round(note.start()*ratio));
-            long end=Math.max(start+1,origin+Math.round(note.end()*ratio));
+            long start=mapping.toPreviewTick(note.start());
+            long end=Math.max(start+1,mapping.toPreviewTick(note.end()));
             track.add(new MidiEvent(new ShortMessage(ShortMessage.NOTE_ON,channel,pitch,note.velocity()),start));
             track.add(new MidiEvent(new ShortMessage(ShortMessage.NOTE_OFF,channel,pitch,0),end));
         }

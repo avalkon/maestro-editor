@@ -94,6 +94,7 @@ public class NoteFilterSequencerWrapper extends SequencerWrapper {
 			//boolean midi = !(this instanceof LotroSequencerWrapper);
 			//System.out.println((midi?"MIDI":"ABC")+" Setting track " + track + " solo to " + solo+" for note "+noteId);
 			sequencer.setTrackSolo(track, solo);
+            keepTempoTrackActiveDuringSolo();
 			if (part == null) {
 				filter.setNoteSolo(noteId, solo);
 			} else {

@@ -13,6 +13,7 @@ import java.util.logging.Logger;
 
 import javax.sound.midi.InvalidMidiDataException;
 import javax.sound.midi.MidiEvent;
+import javax.sound.midi.MetaMessage;
 import javax.sound.midi.Sequence;
 import javax.sound.midi.Track;
 
@@ -122,7 +123,10 @@ public class AbcExporter {
 						throw new AbcConversionException("Failed to read instrument sample durations.", e);
 					}
 				}
-				return new Quad<>(infoList, new Sequence(Sequence.PPQ, 96), histogram, dissonanceDetector);
+                boolean authored = parts.stream().anyMatch(p -> p.getAbcSong().hasAuthoredPartNotes());
+                Sequence empty = new Sequence(Sequence.PPQ, authored ? qtm.getMidiResolution() : 96);
+                if (authored) empty.createTrack();
+                return new Quad<>(infoList, empty, histogram, dissonanceDetector);
 			}
 			if (parts.size() > MAX_RAID) {
 				throw new AbcConversionException("Songs with more than " + MAX_RAID + " parts can never be previewed.\n"
@@ -6875,6 +6879,20 @@ public class AbcExporter {
     /**
      * Add tempo events to midi meta track.
      */
+    /** Authored notes may extend beyond the last imported note, or be the
+     * only notes in the sequence. Install the tempo map through their end. */
+    void refreshAuthoredPreviewTempos(Sequence sequence) {
+        if (sequence.getTracks().length == 0) return;
+        long end = sequence.getTickLength();
+        Track track = sequence.getTracks()[0];
+        for (int i = track.size() - 1; i >= 0; i--) {
+            MidiEvent event = track.get(i);
+            if (event.getMessage() instanceof MetaMessage meta && meta.getType() == 0x51)
+                track.remove(event);
+        }
+        addMidiTempoEvents(track, end);
+    }
+
 	private void addMidiTempoEvents(Track track0, long end) {
 		NavigableMap<Long, TimingInfoEvent> timings = qtm.getTimingInfoByTick();
 		if (organic) {
@@ -7329,7 +7347,10 @@ public class AbcExporter {
 		long endTick = Long.MIN_VALUE;
 		for (AbcPart part : parts) {
 			if (skipSilenceAtStart) {
-				long firstNoteStart = part.firstNoteStartTick();
+				// A hidden imported layer must not move the time origin of its
+                // authored copy. Include retained tracks only in this start scan.
+                var copy = part.getAbcSong().getNoteEditorDeltas().get(part.getPartNumber());
+                long firstNoteStart = part.firstNoteStartTick(copy != null && copy.fullCopy());
 				if (firstNoteStart < startTick) {
 					startTick = firstNoteStart;
 				}
@@ -7345,6 +7366,7 @@ public class AbcExporter {
 			startTick = 0L;
 		if (endTick == Long.MIN_VALUE)
 			endTick = 0L;
+        endTick = Math.max(startTick, endTick);
 
         startTickForCountIn = startTick;// the bar duration at this place is what we use for calculating count-in time.
 

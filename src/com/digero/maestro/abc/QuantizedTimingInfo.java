@@ -58,7 +58,6 @@ public class QuantizedTimingInfo implements ITempoCache, IBarNumberCache {
 	public QuantizedTimingInfo(SequenceInfo source, int newTempo, int origTempo, TimeSignature meter,
 			boolean useTripletTiming, AbcSong song, boolean mixTimings, int mixVersion, boolean organic)
 			throws AbcConversionException {
-
         /*
 		double exportPrimaryTempoMPQ = TimingInfo.roundTempoMPQ(source.getPrimaryTempoMPQ()*origTempo/newTempo);
 		this.primaryTempoMPQ = (int) Math.round(exportPrimaryTempoMPQ * newTempo/origTempo);
@@ -142,7 +141,7 @@ public class QuantizedTimingInfo implements ITempoCache, IBarNumberCache {
 			// Add in tune editor tempo changes where there was not a midi tempo change
 			long tick = tuneTempo.getKey();
 			SequenceDataCache.TempoEvent oldTempo = source.getDataCache().getTempoEvents().get(tick);
-			if (oldTempo == null && tick < songLengthTicks) {
+			if (oldTempo == null && (tick < songLengthTicks || song.hasAuthoredPartNotes())) {
 				Entry<Long, TempoEvent> prevTempo = source.getDataCache().getTempoEvents().floorEntry(tick);
 				if (prevTempo != null) {
 					int mpq = prevTempo.getValue().tempoMPQ;
@@ -377,7 +376,7 @@ public class QuantizedTimingInfo implements ITempoCache, IBarNumberCache {
 				long sixTicks = getSixTicks(tempoChange);
 
 				// Max possible number of sixGrid before song ending +1
-				int maxSixths = (int) ((this.songLengthTicks - tempoChange.tick + sixTicks) / sixTicks);
+				int maxSixths = (int) Math.max(0, (this.songLengthTicks - tempoChange.tick + sixTicks) / sixTicks);
 
 				ArrayList<Integer> sixGridsOdds = new ArrayList<>(maxSixths);
 				for (int k = 0; k < maxSixths; k++) {

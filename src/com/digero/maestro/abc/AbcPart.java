@@ -64,6 +64,8 @@ public class AbcPart implements AbcPartMetadataSource, NumberedAbcPart, IDiscard
 	private LotroInstrument instrument;
 	private final int[] trackTranspose;
 	private final boolean[] trackEnabled;
+    // Preserve settings of previously enabled source tracks.
+    private final boolean[] trackConfigured;
 	private List<String> trackNames;//used only by autoexporter
 	private final boolean[] trackPriority;
 	public boolean[] playLeft;
@@ -161,6 +163,7 @@ public class AbcPart implements AbcPartMetadataSource, NumberedAbcPart, IDiscard
 		int trackCount = abcSong == null?1:getTrackCount();
 		this.trackTranspose = new int[trackCount];
 		this.trackEnabled = new boolean[trackCount];
+        this.trackConfigured = new boolean[trackCount];
 		this.trackPriority = new boolean[trackCount];
 		this.playLeft = new boolean[trackCount];
 		this.playCenter = new boolean[trackCount];
@@ -272,13 +275,14 @@ public class AbcPart implements AbcPartMetadataSource, NumberedAbcPart, IDiscard
 			ele.setAttribute("noteMax", String.valueOf(noteMax));
 		}
 		for (int track = 0; track < getTrackCount(); track++) {
-			if (!isTrackEnabled(track))
+			if (!trackConfigured[track] && !isTrackEnabled(track))
 				continue;
 
 			TrackInfo trackInfo = abcSong.getSequenceInfo().getTrackInfo(track);
 
 			Element trackEle = (Element) ele.appendChild(doc.createElement("track"));
 			trackEle.setAttribute("id", String.valueOf(track));
+            if (!isTrackEnabled(track)) trackEle.setAttribute("enabled", "false");
 			if (trackInfo.hasName()) {
 				trackEle.setAttribute("name", XmlUtil.sanitizeStringForXMLSaving(trackInfo.getName()));
 			} else if (abcSong.ignoreMidiText && trackNames != null && trackNames.size() > track && trackNames.get(track) != null) {
@@ -502,7 +506,7 @@ public class AbcPart implements AbcPartMetadataSource, NumberedAbcPart, IDiscard
 					trackNames.add(null);
 				}
 				trackNames.set(t, xmlTrackName);
-				if (!abcSong.getSequenceInfo().getTrackInfo(t).hasEvents()) {
+				if (SaveUtil.parseValue(trackEle, "@enabled", true) && !abcSong.getSequenceInfo().getTrackInfo(t).hasEvents()) {
 					if (warningHandler != null) {
 						// Abc Tools just get a log
 						log.warning(UIText.get("maestro.0.has.a.midi.track.track.1.selected.that.has.no.notes", title, t));
@@ -563,8 +567,10 @@ public class AbcPart implements AbcPartMetadataSource, NumberedAbcPart, IDiscard
 				}
 				
 				// Now set the track info
-				trackEnabled[t] = true;
-				enabledTrackCount++;
+				trackConfigured[t] = true;
+                boolean enabled = SaveUtil.parseValue(trackEle, "@enabled", true);
+                if (trackEnabled[t] != enabled) enabledTrackCount += enabled ? 1 : -1;
+                trackEnabled[t] = enabled;
 				boolean isFx = SaveUtil.parseValue(trackEle, "@fx", false);
 				studentFromABC = SaveUtil.parseValue(trackEle, "@studentOverride", false);
 				trackTranspose[t] = SaveUtil.parseValue(trackEle, "transpose", trackTranspose[t]);
@@ -933,10 +939,16 @@ public class AbcPart implements AbcPartMetadataSource, NumberedAbcPart, IDiscard
 	}
 
 	public long firstNoteStartTick() {
+		return firstNoteStartTick(false);
+	}
+
+    /** Full-copy notes use the generated score's original time origin. Keep
+     * retained sources in the start scan even when their playback is off. */
+    public long firstNoteStartTick(boolean includeRetainedSources) {
 		long startTick = Long.MAX_VALUE;
 
 		for (int t = 0; t < getTrackCount(); t++) {
-			if (isTrackEnabled(t)) {
+			if (isTrackEnabled(t) || (includeRetainedSources && isTrackConfigured(t))) {
 				for (MidiNoteEvent ne : getTrackEvents(t)) {
 					if (mapNoteEvent(t, ne) != null && shouldPlay(ne, t)) {
 						if (ne.getStartTick() < startTick) {
@@ -1310,7 +1322,7 @@ public class AbcPart implements AbcPartMetadataSource, NumberedAbcPart, IDiscard
 		Pair<Integer, Integer> secLimits = new Pair<>(minDefault.id,Note.MAX.id);
 		if (isPercussionPart())
 			return secLimits;
-		if (!isTrackEnabled(track))
+		if (!isTrackEnabled(track) && !isTrackConfigured(track))
 			return secLimits;
 		
 		if (sectionsTicked != null) {
@@ -1337,7 +1349,7 @@ public class AbcPart implements AbcPartMetadataSource, NumberedAbcPart, IDiscard
 
 	public int getSectionTranspose(long tickStart, int track) {
 		int secTrans = 0;
-		if (!isTrackEnabled(track))
+		if (!isTrackEnabled(track) && !isTrackConfigured(track))
 			return secTrans;
 		if (isPercussionPart())
 			return secTrans;
@@ -1515,7 +1527,12 @@ public class AbcPart implements AbcPartMetadataSource, NumberedAbcPart, IDiscard
 		return trackEnabled[track];
 	}
 
+	public boolean isTrackConfigured(int track) {
+        return trackConfigured[track];
+    }
+
 	public void setTrackEnabled(int track, boolean enabled) {
+        if (enabled) trackConfigured[track] = true;
 		if (trackEnabled[track] != enabled) {
 			trackEnabled[track] = enabled;
 			enabledTrackCount += enabled ? 1 : -1;
@@ -1974,6 +1991,7 @@ public class AbcPart implements AbcPartMetadataSource, NumberedAbcPart, IDiscard
         // Copy arrays
         System.arraycopy(orig.trackTranspose, 0, this.trackTranspose, 0, origTrackCount);
         System.arraycopy(orig.trackEnabled, 0, this.trackEnabled, 0, origTrackCount);
+        System.arraycopy(orig.trackConfigured, 0, this.trackConfigured, 0, origTrackCount);
         System.arraycopy(orig.trackPriority, 0, this.trackPriority, 0, origTrackCount);
         System.arraycopy(orig.playLeft, 0, this.playLeft, 0, origTrackCount);
         System.arraycopy(orig.playCenter, 0, this.playCenter, 0, origTrackCount);

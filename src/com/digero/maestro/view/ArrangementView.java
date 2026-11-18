@@ -958,7 +958,7 @@ public class ArrangementView extends JPanel implements ICompileConstants, TableL
             var routing = song.getAuthoredTrackRouting();
             var sources = new java.util.TreeMap<>(song.getNoteEditorDeltas());
             for (var source : sources.entrySet()) {
-                if (source.getValue().added().isEmpty()) continue;
+                if (source.getValue().added().isEmpty() && !source.getValue().fullCopy()) continue;
                 int sourceNumber = source.getKey();
                 AbcPart origin = null;
                 for (AbcPart candidate : song.getParts())
@@ -1031,6 +1031,20 @@ public class ArrangementView extends JPanel implements ICompileConstants, TableL
 
 		revalidate();
 		repaint();
+	}
+
+    /** Update the virtual imported checkbox after switching between a
+     * retained original and its independently routed authored copy. */
+    public void refreshTrackRoutingAppearance() {
+        for (TrackPanel panel : trackPanels.values())
+            panel.refreshImportedRoutingAppearance();
+        for (AuthoredTrackPanel row : authoredTrackPanels)
+            row.refreshRoutingFromProject();
+    }
+
+	public void refreshAuthoredPlaybackAppearance() {
+		for (AuthoredTrackPanel row : authoredTrackPanels)
+			row.refreshPlaybackAppearance();
 	}
 
 	public AbcPart getAbcPart() {

@@ -19,7 +19,8 @@ public class MiscSettings {
 	public boolean autoplayOnOpen = true;
 
 	private final Preferences prefs;
-	public boolean checkForUpdates = true;
+	// An upstream version manifest is not a version manifest for this fork.
+    public boolean checkForUpdates = false;
 
     // dissonance settings
     public boolean dissModified = false;// not persistent

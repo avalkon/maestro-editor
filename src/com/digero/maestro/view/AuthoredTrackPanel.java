@@ -6,6 +6,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Set;
 import java.util.function.BiConsumer;
+import java.util.function.IntPredicate;
 import javax.sound.midi.Sequence;
 import javax.swing.*;
 
@@ -100,30 +101,45 @@ public final class AuthoredTrackPanel extends JPanel implements ArrangementViewI
     static List<NoteEvent> graphEvents(List<NoteEditorDelta.Value> notes, AbcPart origin,
                                        SequencerWrapper sequencer) {
         Sequence sequence = sequencer.getSequence();
-        double ratio = sequence == null ? 1.0 :
-                sequence.getResolution() / (double) AbcDocumentIO.PPQ;
         long offset = sequencer instanceof LotroSequencerWrapper lotro ? lotro.getStartTick() : 0L;
+        double microsPerTick = 60_000_000.0 / (origin.getAbcSong().getTempoBPM() * (double) AbcDocumentIO.PPQ);
+        long startMicros = sequencer.tickToMicros(offset);
         int octaveShift = origin.getInstrument().octaveDelta * 12;
         List<NoteEvent> events = new ArrayList<>();
         for (NoteEditorDelta.Value value : notes) {
             Note pitch = Note.fromId(value.pitch() - octaveShift);
             if (pitch == null) continue;
-            long start = Math.max(0, offset + Math.round(value.start() * ratio));
-            long end = Math.max(start + 1, offset + Math.round(value.end() * ratio));
+            long start = sequence == null ? value.start() : Math.max(0,
+                sequencer.microsToTick(startMicros + Math.round(value.start() * microsPerTick)));
+            long end = Math.max(start + 1, sequence == null ? value.end() :
+                sequencer.microsToTick(startMicros + Math.round(value.end() * microsPerTick)));
             events.add(new NoteEvent(pitch, value.velocity(), start, end, sequencer));
         }
         events.sort(Comparator.comparingLong(NoteEvent::getStartTick));
         return events;
     }
 
+    private boolean isAudibleInAnyDestination() {
+        // Part routing is independent of mute/solo. A source routed only to
+        // muted (or solo-excluded) parts must look disabled, even if its route
+        // checkbox is selected. Another active destination keeps it enabled.
+        for (AbcPart part : destinationPart.getAbcSong().getParts())
+            if (localDestinations.contains(part.getPartNumber()) && part.isActive())
+                return true;
+        return false;
+    }
+
     private void updateAppearance(boolean assignedHere, boolean anyAssigned) {
-        Color bg = assignedHere ? ColorTable.GRAPH_BACKGROUND_ENABLED.get()
+        boolean audible = anyAssigned && isAudibleInAnyDestination();
+        Color bg = assignedHere && audible ? ColorTable.GRAPH_BACKGROUND_ENABLED.get()
                 : ColorTable.GRAPH_BACKGROUND_OFF.get();
         setOpaque(true);
         setBackground(bg);
         graph.setBackground(bg);
-        graph.setNoteColor(assignedHere ? ColorTable.NOTE_ENABLED : ColorTable.NOTE_OFF);
-        routeBox.setForeground(assignedHere ? ColorTable.PANEL_TEXT_ENABLED.get()
+        // An authored lane remains assigned/playable even when it is routed
+        // to a DIFFERENT Song Part. Only fully unassigned lanes are grey.
+        graph.setNoteColor(audible ? ColorTable.NOTE_ENABLED : ColorTable.NOTE_OFF);
+        routeBox.setForeground(assignedHere && audible ? ColorTable.PANEL_TEXT_ENABLED.get()
                 : ColorTable.PANEL_TEXT_DISABLED.get());
         // Identical assignment semantics to the gutter on imported tracks:
         // selected part, another part, or no part at all.
@@ -134,13 +150,44 @@ public final class AuthoredTrackPanel extends JPanel implements ArrangementViewI
     }
 
     private boolean isAuthoredPlaybackActive(SequencerWrapper sequencer) {
-        if (!abcPreviewMode || !routeBox.isSelected() || !sequencer.isRunning())
+        if (!abcPreviewMode || !sequencer.isRunning())
             return false;
-        for (var track : destinationPart.getAuthoredPreviewTracks()) {
-            if (track.sourcePartNumber == sourcePartNumber && sequencer.isTrackActive(track.trackNumber))
-                return true;
+        return hasActiveAuthoredPreviewTrack(destinationPart.getAbcSong(), sourcePartNumber,
+                sequencer::isTrackActive);
+    }
+
+    /** Authored source rows are displayed for every selected Song Part, but their
+     * playback is NOT scoped to that part's routing checkbox. Check the actual
+     * preview tracks in every destination, just like imported-track highlighting.
+     * The sequencer determines whether mute/solo makes each track audible. */
+    static boolean hasActiveAuthoredPreviewTrack(com.digero.maestro.abc.AbcSong song,
+                                                  int sourcePartNumber, IntPredicate isTrackActive) {
+        for (AbcPart part : song.getParts()) {
+            for (var track : part.getAuthoredPreviewTracks()) {
+                if (track.sourcePartNumber == sourcePartNumber
+                        && isTrackActive.test(track.trackNumber))
+                    return true;
+            }
         }
         return false;
+    }
+
+    /** Imported-source checkboxes can reselect the retained original, which
+     * removes this row's route without recreating the whole arrangement. */
+    public void refreshRoutingFromProject() {
+        var configured = com.digero.maestro.noteedit.AuthoredTrackRouting.targets(
+            sourcePartNumber,destinationPart.getAbcSong().getAuthoredTrackRouting());
+        localDestinations.clear();
+        localDestinations.addAll(configured);
+        assignedAnywhere = !localDestinations.isEmpty();
+        routeBox.setSelected(localDestinations.contains(selectedPartNumber));
+        updateAppearance(routeBox.isSelected(),assignedAnywhere);
+    }
+
+    /** Mute/solo toggles don't recreate the arrangement; repaint these rows
+     * when the active destination set changes. */
+    public void refreshPlaybackAppearance() {
+        updateAppearance(routeBox.isSelected(), assignedAnywhere);
     }
 
     public int getSourcePartNumber() { return sourcePartNumber; }

@@ -350,6 +350,44 @@ public final class AbcDocumentIO {
             return length;
         } catch(NumberFormatException ex) { throw new IOException("Unsupported meter for edited ABC part: " + meter); }
     }
+    /** Lossless MSX note data is never modified. This only adapts the output
+     * to the one-voice-per-pitch playback semantics of LOTRO ABC. */
+    static List<EditableNote> forAbcSingleVoice(List<EditableNote> originals) {
+        Map<Integer,List<EditableNote>> byPitch = new TreeMap<>();
+        for (EditableNote note:originals)
+            byPitch.computeIfAbsent(note.pitch(), ignored -> new ArrayList<>()).add(note);
+        List<EditableNote> result = new ArrayList<>(originals.size());
+        int reattacks = 0;
+        for (List<EditableNote> pitchNotes:byPitch.values()) {
+            pitchNotes.sort(Comparator.comparingLong(EditableNote::start)
+                .thenComparing(Comparator.comparingLong(EditableNote::end).reversed()));
+            List<EditableNote> normalized = new ArrayList<>();
+            for (EditableNote note:pitchNotes) {
+                if (!normalized.isEmpty()) {
+                    int last = normalized.size()-1;
+                    EditableNote previous = normalized.get(last);
+                    if (previous.start()==note.start()) {
+                        // Simultaneous unisons are one attack in-game; keep
+                        // the longest written note for this export only.
+                        reattacks++;
+                        continue;
+                    }
+                    if (previous.end() > note.start()) {
+                        reattacks++;
+                        normalized.set(last,previous.resize(note.start()));
+                    }
+                }
+                normalized.add(note);
+            }
+            result.addAll(normalized);
+        }
+        if (reattacks>0)
+            java.util.logging.Logger.getLogger(AbcDocumentIO.class.getName())
+                .warning("ABC represents overlapping same-pitch notes as " +
+                    reattacks + " retrigger(s); full original overlaps remain in MSX");
+        return result;
+    }
+
     private static String render(List<EditableNote> notes, long bar, int pitchShift, int bpm,
                                  int[] keySignature) throws IOException {
         TreeSet<Long> edges=new TreeSet<>(); edges.add(0L);
@@ -390,6 +428,15 @@ public final class AbcDocumentIO {
             adjustedNotes.add(clean);
             edges.add(start); edges.add(end);
         }
+        // A LOTRO ABC part is one voice: it cannot independently hold two
+        // overlapping attacks at an identical pitch. Preserve every note in
+        // the project/editor, but render overlapping reattacks as monophonic
+        // retriggers. The previous note ends when the next attack occurs.
+        // This is the same single-pitch limitation as LOTRO's ABC playback,
+        // rather than aborting the entire export (or losing the edit in MSX).
+        adjustedNotes = forAbcSingleVoice(adjustedNotes);
+        edges.clear(); edges.add(0L);
+        for (EditableNote n:adjustedNotes) { edges.add(n.start()); edges.add(n.end()); }
         for(long t=bar;t<finish;t+=bar)edges.add(t);
         List<Long> ticks=new ArrayList<>(edges);
         Map<Long,List<EditableNote>> noteStarts=new HashMap<>(), noteEnds=new HashMap<>();

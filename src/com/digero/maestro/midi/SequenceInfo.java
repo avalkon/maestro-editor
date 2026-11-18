@@ -321,7 +321,7 @@ public class SequenceInfo implements MidiConstants {
         if (editorSong != null && !editorSong.getNoteEditorDeltas().isEmpty()) {
             java.util.Set<Integer> removedPartNumbers = new java.util.HashSet<>();
             for (var entry : editorSong.getNoteEditorDeltas().entrySet()) {
-                if (!entry.getValue().removed().isEmpty())
+                if (!entry.getValue().removed().isEmpty() && !entry.getValue().fullCopy())
                     removedPartNumbers.add(entry.getKey());
             }
             try {

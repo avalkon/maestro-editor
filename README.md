@@ -21,6 +21,26 @@ If you encounter any issues you can't figure out, please feel free to submit an
 issue or contact me in-game, or find me through the official LotRO or Sting discords.
 
 
+## Independent imported and authored lanes (test build)
+
+On first piano-roll edit, a full authored copy is selected and the original
+imported part is initially unchecked. Both checkboxes can subsequently be
+controlled independently. With both checked, their notes play together, and
+note counts/polyphony include both. Imported source settings remain intact.
+This state persists in MSX via `<importedSource>` elements.
+
+Note: LOTRO ABC is monophonic for a given pitch within one part. A simultaneous
+same-pitch attack from both lanes cannot be exported as two independent voices;
+route the authored copy to another Song Part for completely independent voices.
+
+## Authored playback highlighting (test build)
+
+Authored preview rows now highlight notes whenever any routed destination's
+preview track is audible, even when the currently displayed Song Part does not
+contain the authored source. The effective MIDI track mute/solo state controls
+highlighting. Selecting another Song Part no longer extinguishes notes that
+are still playing in a different destination.
+
 ## Known beta caveats
 
 - ABC part delta rebasing after major arrangement changes can be imperfect.

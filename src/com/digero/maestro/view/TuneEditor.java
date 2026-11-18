@@ -267,8 +267,20 @@ public class TuneEditor {
 				
 				JButton okButton = new JButton("APPLY");
 				okButton.addActionListener(e -> {
-					ProjectFrame.feed(null, null);
-					TreeMap<Float, TuneLine> tm = new TreeMap<>();
+                    ProjectFrame.feed(null, null);
+                    if (jf instanceof ProjectFrame projectFrame)
+                        projectFrame.persistRollEditsBeforeTuneApply();
+                    // Snapshot the OLD sections before Apply replaces them;
+                    // authored note deltas must be rebased exactly once.
+                    TreeMap<Float,TuneLine> previousTune = null;
+                    if (abcSong.tuneBars != null) {
+                        previousTune = new TreeMap<>();
+                        for (var section:abcSong.tuneBars.entrySet())
+                            previousTune.put(section.getKey(),new TuneLine(section.getValue()));
+                    }
+                    Float previousFirstBar = abcSong.getFirstBar(), previousLastBar = abcSong.getLastBar();
+                    boolean[] previousModified = abcSong.tuneBarsModified;
+                    TreeMap<Float, TuneLine> tm = new TreeMap<>();
 
 					float lastEnd = 0;
 					lastEnd = processSections(tm, lastEnd);
@@ -326,7 +338,20 @@ public class TuneEditor {
 						endSong.setText(lastBars==null?"100000.0":Float.toString(lastBars));
 					}					
 					
-					TuneDialog.this.abcSong.tuneEdited();
+                    try {
+                        TuneDialog.this.abcSong.tuneEdited(previousTune);
+                    } catch (IllegalStateException failed) {
+                        // A failed tempo conversion or ambiguous legacy delta
+                        // must not leave the tune map changed with old notes.
+                        abcSong.tuneBars = previousTune;
+                        abcSong.tuneBarsModified = previousModified;
+                        abcSong.setFirstBar(previousFirstBar);
+                        abcSong.setLastBar(previousLastBar);
+                        abcSong.convertTunelinesToLongs();
+                        abcSong.setMixDirty(true);
+                        javax.swing.JOptionPane.showMessageDialog(TuneDialog.this,
+                            failed.getMessage(), "Tune Editor", javax.swing.JOptionPane.WARNING_MESSAGE);
+                    }
 					// System.err.println(Thread.currentThread().getName());
 				});
 				okButton.setToolTipText(

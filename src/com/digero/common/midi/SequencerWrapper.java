@@ -11,6 +11,7 @@ import java.util.logging.Logger;
 
 import javax.sound.midi.InvalidMidiDataException;
 import javax.sound.midi.MidiEvent;
+import javax.sound.midi.MetaMessage;
 import javax.sound.midi.MidiMessage;
 import javax.sound.midi.MidiSystem;
 import javax.sound.midi.MidiUnavailableException;
@@ -579,9 +580,41 @@ public class SequencerWrapper implements MidiConstants, ITempoCache, IDiscardabl
 			//System.out.println((midi?"MIDI":"ABC")+" Setting track " + track + " solo to " + solo);
 			trackActiveCache = null;
 			sequencer.setTrackSolo(track, solo);
+            keepTempoTrackActiveDuringSolo();
 			fireChangeEvent(SequencerProperty.TRACK_ACTIVE);
 		}
 	}
+
+    /** A metadata-only conductor track must participate in solo playback.
+     * Stock Java skips disabled tracks when chasing events after a running seek.
+     * Its tempo track then retains a stale event index, so later tempo events
+     * may be skipped (especially after seeking backwards into an accelerando).
+     * Never enable a track containing musical or other synth messages here.
+     */
+    protected void keepTempoTrackActiveDuringSolo() {
+        Sequence sequence = sequencer.getSequence();
+        if (sequence == null || sequence.getTracks().length < 2) return;
+        Track[] tracks = sequence.getTracks();
+        Track conductor = tracks[0];
+        boolean hasTempo = false;
+        for (int i = 0; i < conductor.size(); i++) {
+            MidiMessage msg = conductor.get(i).getMessage();
+            if (!(msg instanceof MetaMessage)) return;
+            if (MidiUtils.isMetaTempo(msg)) hasTempo = true;
+        }
+        if (!hasTempo) return;
+        boolean anySolo = false;
+        for (int i = 1; i < tracks.length; i++) {
+            if (sequencer.getTrackSolo(i)) {
+                anySolo = true;
+                break;
+            }
+        }
+        if (sequencer.getTrackSolo(0) != anySolo) {
+            sequencer.setTrackSolo(0, anySolo);
+            trackActiveCache = null;
+        }
+    }
 
 	/**
 	 * Takes into account both muting and solo.

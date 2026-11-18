@@ -631,7 +631,8 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
 			@Override
 			public void transposeSettingsChanged() {
 				if (abcSong != null && fireTransposeListeners) {
-					abcSong.setTranspose(songExportSettingsPanel.getTranspose());
+                    if (rollActive && abcRollEditor != null) stageRollEdits();
+                    abcSong.setTranspose(songExportSettingsPanel.getTranspose());
 					refreshPreviewSequence(false);
 				}
 			}
@@ -1286,12 +1287,16 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
 			Util.openURL(MaestroMain.WIKI_URL, this);
 		});
 		
-		JMenuItem versionItem = toolsMenu.add(new JMenuItem(UIText.get("maestro.menu.check.for.updates")));
-		versionItem.setMnemonic('V');
-		versionItem.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_F6, 0));
-		versionItem.addActionListener(e -> {
-			checkVersionCompare();
-		});
+        JMenuItem forkReleases = toolsMenu.add(new JMenuItem("Fork Releases..."));
+        forkReleases.setToolTipText("Open avalkon/maestro-editor releases in your browser.");
+        forkReleases.setMnemonic('V');
+        forkReleases.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_F6, 0));
+        forkReleases.addActionListener(e ->
+            Util.openURL("https://github.com/avalkon/maestro-editor/releases", this));
+
+        JMenuItem versionItem = toolsMenu.add(new JMenuItem("Check for Upstream Updates"));
+        versionItem.setToolTipText("Checks original upstream NikolaiVChr/maestro versions only.");
+        versionItem.addActionListener(e -> checkVersionCompare());
 		
 		toolsMenu.addSeparator();
 
@@ -1405,6 +1410,7 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
         if (destinations.equals(java.util.Set.of(sourcePartNumber))) routes.remove(sourcePartNumber);
         else routes.put(sourcePartNumber, destinations);
         abcSong.setAuthoredTrackRouting(routes);
+        arrangementView.refreshTrackRoutingAppearance();
         setAbcSongModified(true);
         refreshPreviewSequence(false);
     }
@@ -1459,9 +1465,10 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
             }
             boxes.put(source,destinations);
         }
-        JTextArea info=new JTextArea("Notes stay in their original Piano Roll track. " +
+        JTextArea info=new JTextArea("Notes stay in their own Piano Roll track. " +
             "Each checked destination gets a separate preview track. " +
-            "Unchecking every destination silences that track without deleting it from the project. " +
+            "Imported and authored checkboxes are independent and can both play at once. " +
+            "Unchecking every destination silences only the authored copy. " +
             "Existing MIDI source tracks are not changed.");
         info.setEditable(false);info.setLineWrap(true);info.setWrapStyleWord(true);
         info.setOpaque(false);info.setColumns(64);info.setRows(3);
@@ -2254,6 +2261,8 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
         //log.warning(this.getClass().getTypeName()+" AbcPartEvent: "+e.getProperty());
 
         if (e.getProperty() == AbcPartProperty.EXCLUSION) {
+            if (arrangementView != null)
+                arrangementView.refreshAuthoredPlaybackAppearance();
             if (histogram != null) {
                 histogram.setDirty();
                 compileStats();
@@ -2325,6 +2334,7 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
 				break;
 			case TRANSPOSE:
 				setTransposeWithoutEvent(abcSong.getTranspose());
+                requestRollBaselineRefresh();
 				break;
 			case KEY_SIGNATURE:
 				if (SHOW_KEY_FIELD) {
@@ -2379,6 +2389,10 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
 				break;
 			case TUNE_EDIT:
 				scheduleUiRefresh();
+                // Apply rebases the persisted notes immediately. Do not let an
+                // old editor document overwrite them on a quick second Apply
+                // or Save before the asynchronous baseline refresh completes.
+                refreshRollAfterTuneEdit();
 				if (songPartsListPanel.getSelectedPart() != null) {
 					// We do this to show the tempo panel if the tune editor has changed something
 					arrangementView.setAbcPart(songPartsListPanel.getSelectedPart(), true);
@@ -3326,7 +3340,21 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
      */
     private void applyPreview(SequenceInfo previewSequenceInfo, AbcExporter exporter, long appliedRequestSeq) {
         abcPreviewStartTick = exporter.getExportStartTick();
-        abcBarLabel.setBarNumberCache(exporter.getTimingInfo());
+        // The source/export timing table can describe only the one-bar blank
+        // scaffold in a native composition. Calculate authored-only bar labels
+        // from the preview resolution and composition meter instead.
+        if (abcSong != null && abcSong.isCompositionMode() && abcSong.hasAuthoredPartNotes()) {
+            final int resolution = previewSequenceInfo.getSequence().getResolution();
+            final long barTicks = Math.max(1L, Math.round(resolution * 4.0 *
+                abcSong.getTimeSignature().numerator / abcSong.getTimeSignature().denominator));
+            abcBarLabel.setBarNumberCache(new com.digero.common.midi.IBarNumberCache() {
+                public int tickToBarNumber(long tick) { return (int)Math.max(0, tick/barTicks); }
+                public float tickToBarNumberFloat(long tick) { return Math.max(0, tick)/(float)barTicks; }
+                public long getBarToTick(int bar) { return Math.max(0L,bar)*barTicks; }
+            });
+        } else {
+            abcBarLabel.setBarNumberCache(exporter.getTimingInfo());
+        }
         abcBarLabel.setInitialOffsetTick(abcPreviewStartTick);
         abcPositionLabel.setInitialOffsetTick(abcPreviewStartTick);
 
@@ -3398,7 +3426,7 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
             // Reconcile ALL tracks per part, not just whichever (often authored)
             // track happens to appear last in the preview metadata list.
             com.digero.maestro.abc.PreviewPartStats.updateExportedNoteCounts(
-                previewSequenceInfo.getLastTrackInfos());
+                previewSequenceInfo.getLastTrackInfos(), abcSong.getEditedPreviewSourcePartNumbers());
             // The selected part's separate authored-track graphs must be
             // reconstructed after receiving new preview metadata. Without this
             // they remain invisible until the user reselects the Song Part.
@@ -3460,6 +3488,11 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
 			previewAppliedSeq = appliedRequestSeq;
             requestRollBaselineRefresh();
             applyRollPlaybackScope();
+            // setSequence() raises TRACK_ACTIVE before the new preview track
+            // numbers are installed. A removed part shifts later track indices,
+            // so imported rows can cache colors for the previous mapping.
+            // Reconcile every row once the new routing and mute/solo state are final.
+            arrangementView.refreshTrackRoutingAppearance();
             // Only refresh the row layout once the new sequencer, histogram,
             // and part metadata are ready. The old B2.4 path rebuilt it inside
             // the metadata loop and could paint a half-initialized preview.
@@ -3619,6 +3652,7 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
                 }
             }
         }
+		if (abcSong != null && abcSong.hasAuthoredPartNotes()) hasAbcNotes = true;
 		if (abcSong == null || !hasAbcNotes) {
 			arrangementView.setStats("No stats available");
 			return;
@@ -3747,7 +3781,7 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
 	private String getEmptyParts() {
 		StringBuilder out = new StringBuilder();
 		for (AbcPart part : abcSong.getParts()) {
-			if (part.getEnabledTrackCount() == 0) {
+			if (part.getEnabledTrackCount() == 0 && part.getAuthoredPreviewTracks().isEmpty()) {
 				out.append(UIText.get("maestro.partnumber")).append(part.getPartNumber()).append(UIText.get("maestro.has.no.assigned.tracks"));
 			}
 		}
@@ -3861,15 +3895,23 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
         SequencerWrapper transport=abc?abcSequencer:sequencer;
         javax.sound.midi.Sequence seq=transport.getSequence();
         if(seq==null || editorPpq<=0)return 0;
-        long offset=abc?abcPreviewStartTick:0;
-        return Math.max(0,offset+Math.round(editorTick*(double)seq.getResolution()/editorPpq));
+        if (abc && abcSong != null) {
+            double microsPerTick = 60_000_000.0 / (abcSong.getTempoBPM() * (double) editorPpq);
+            return Math.max(0, transport.microsToTick(transport.tickToMicros(abcPreviewStartTick)
+                + Math.round(editorTick * microsPerTick)));
+        }
+        return Math.max(0,Math.round(editorTick*(double)seq.getResolution()/editorPpq));
     }
     private long maestroTickToRoll(boolean abc,int editorPpq){
         SequencerWrapper transport=abc?abcSequencer:sequencer;
         javax.sound.midi.Sequence seq=transport.getSequence();
         if(seq==null)return 0;
-        long offset=abc?abcPreviewStartTick:0;
-        return Math.max(0,Math.round((transport.getTickPosition()-offset)*(double)editorPpq/seq.getResolution()));
+        if (abc && abcSong != null) {
+            double microsPerTick = 60_000_000.0 / (abcSong.getTempoBPM() * (double) editorPpq);
+            return Math.max(0, Math.round((transport.tickToMicros(transport.getTickPosition())
+                - transport.tickToMicros(abcPreviewStartTick)) / microsPerTick));
+        }
+        return Math.max(0,Math.round(transport.getTickPosition()*(double)editorPpq/seq.getResolution()));
     }
     private com.digero.maestro.noteedit.NoteEditorApp.TransportBridge makeRollTransport(boolean abc){
         return new com.digero.maestro.noteedit.NoteEditorApp.TransportBridge(){
@@ -3953,6 +3995,38 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
                 }
             }
         }.execute();
+    }
+
+    /** Update the cached editor atomically with Tune Apply, including when
+     * the roll is hidden. Cancel outstanding refreshes of the previous map. */
+    private void refreshRollAfterTuneEdit() {
+        rollBaselineRefreshTimer.stop();
+        ++rollRefreshGeneration;
+        if (abcRollEditor == null || rollSong != abcSong || abcSong == null) return;
+        Path temp = null;
+        try {
+            temp = Files.createTempFile("maestro-tune-roll-", ".abc");
+            new AbcSong(abcSong).exportGeneratedAbc(temp.toFile(), MaestroMain.APP_NAME);
+            abcRollEditor.reloadGeneratedAbc(abcSong.addMissingEditorParts(Files.readString(temp)),
+                abcSong.getNoteEditorDeltas());
+            AbcPart selected = songPartsListPanel.getSelectedPart();
+            if (selected != null) selectExactRollPart(selected);
+            syncRollMuteSolo();
+        } catch (Exception ex) {
+            log.log(Level.WARNING, "Could not refresh piano roll after Tune Apply; preserving project notes", ex);
+            // The model is authoritative: never stage an obsolete editor.
+            abcRollEditor.suspendEmbeddedView();
+            rollModeHost.remove(abcRollEditor);
+            abcRollEditor = null;
+            if (rollActive) enterPianoRoll();
+        } finally {
+            if (temp != null) try { Files.deleteIfExists(temp); } catch (IOException ignored) {}
+        }
+    }
+
+    /** Persist edits against OLD Tune Editor sections before applying new FX. */
+    void persistRollEditsBeforeTuneApply() {
+        if (rollActive && abcRollEditor != null) stageRollEdits();
     }
 
     private void stageRollEdits(){
@@ -4091,6 +4165,11 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
                         abcRollEditor=new com.digero.maestro.noteedit.NoteEditorApp.EditorTab(
                             com.digero.maestro.noteedit.NoteDocument.Kind.ABC,ProjectFrame.this,bridge);
                         abcRollEditor.load(files[1]);
+                        // This is a project-owned ABC editor, not the standalone
+                        // ABC file editor. Persist lossless deltas, including
+                        // overlapping unisons, instead of serializing ABC on
+                        // every gesture (which can be lossy or unsupported).
+                        abcRollEditor.useEmbeddedMode();
                         if(current.isCompositionMode())
                             abcRollEditor.setMinimumMeasures(current.getInitialCompositionMeasures());
                         abcRollEditor.useSongPartsSelection();

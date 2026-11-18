@@ -972,7 +972,7 @@ public class SettingsDialog extends JDialog implements TableLayoutConstants {
 		 */
 		
 		final JCheckBox checkForUpdatesCheckBox = new JCheckBox(UIText.get("maestro.options.check.for.updates"));
-		checkForUpdatesCheckBox.setToolTipText(UIText.get("maestro.options.tip.check.for.updates"));
+		checkForUpdatesCheckBox.setToolTipText("Check upstream NikolaiVChr/maestro releases on startup (not this fork).");
 		checkForUpdatesCheckBox.setSelected(miscSettings.checkForUpdates);
 		checkForUpdatesCheckBox.addActionListener(e -> miscSettings.checkForUpdates = checkForUpdatesCheckBox.isSelected());
 		
