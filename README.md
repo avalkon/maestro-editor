@@ -13,6 +13,22 @@ For End Users:
 
 See [latest releases](https://github.com/avalkon/maestro-editor/releases)  for downloads.
 
+Beta 2.1 fixes a whole host of things you may or may not have even noticed. 
+
+Fixed:
+
+- Fixed missing notes in whole-song moves.
+- Fixed authored track colorations.
+- Fixed stats being broken for new compositions.
+- Fixed tune editor pitch & volume on authored parts.
+- One piano roll edit to a track now copies the entire track to an authored track and
+  deselects the imported track, but both can still be selected at the same time. I didn't
+  see any other way to fix some of the super-broken things I created when chasing another issue.
+- Fixed an issue where, with certain files, during playback, if you seeked into a tempo change
+  section with a soloed, authored-copy track, playback could make the entire rest of the song play
+  at the tempo from the playhead's seeked-to position.
+- Tune editor tempo and accelerando now work with authored tracks properly.
+
 Beta 2 combines Maestro 4.7.6-derived source with an integrated piano-roll and introduces 
 **File → New ABC Composition**, with project-owned notes,LotRO instrument parts, and 
 preview-visible authored parts. Import-based export still omits empty tracks, as in upstream Maestro.
@@ -43,7 +59,6 @@ are still playing in a different destination.
 
 ## Known beta caveats
 
-- ABC part delta rebasing after major arrangement changes can be imperfect.
 - Strict LOTRO exported ABC should be validated in ABC Player; keep backups.
 
 
