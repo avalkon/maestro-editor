@@ -85,7 +85,17 @@ public final class NoteEditorApp {
         private final java.util.Map<Integer,boolean[]> partPlaybackState = new java.util.HashMap<>();
         private boolean externalPartSelection;
         private boolean embeddedMode;
+        private boolean initialFitPending;
 
+        private final JComboBox<String> highlightKey = new JComboBox<>(HighlightKey.options().toArray(String[]::new));
+        private boolean syncingHighlightKey;
+        private java.util.function.Consumer<String> highlightKeyChanged = key -> {};
+        public void setHighlightKey(String key) {
+            syncingHighlightKey=true;
+            try { highlightKey.setSelectedItem(HighlightKey.normalize(key)); roll.setHighlightKey(key); refreshed(); }
+            finally { syncingHighlightKey=false; }
+        }
+        public void setOnHighlightKeyChanged(java.util.function.Consumer<String> listener) {highlightKeyChanged=listener;}
         private final JLabel status=new JLabel("Open a file to begin");
         private final JScrollPane scroller=new JScrollPane(roll);
         private final EditorPlayback player=new EditorPlayback();
@@ -94,6 +104,7 @@ public final class NoteEditorApp {
         private final JButton stopButton=new JButton("Stop");
         private final JComboBox<String> scope=new JComboBox<>(new String[]{"Current part", "All parts"});
         private final JCheckBox allParts=new JCheckBox("Display all parts");
+        private final JCheckBox onlyAudible=new JCheckBox("Show only audible");
         private NoteDocument doc;
         private File lastDirectory;
         public EditorTab(NoteDocument.Kind kind,JFrame parent,ProjectBridge bridge){
@@ -116,14 +127,21 @@ public final class NoteEditorApp {
             // in embedded mode, and the main transport owns Play and Stop.
 
             editing.add(new JLabel("Snap: "));
-            JComboBox<String> snap=new JComboBox<>(new String[]{"1/1", "1/2", "1/3", "1/4", "1/6", "1/8", "1/12", "1/16", "1/32", "1/64"});
+            JComboBox<String> snap=new JComboBox<>(new String[]{"1/1", "1/2", "1/3", "1/4", "1/6", "1/8", "1/12", "1/16", "1/24", "1/32", "1/48", "1/64"});
             snap.setSelectedItem("1/16");
+            snap.setToolTipText("Fraction of the current measure (1/24 and 1/48 are triplet subdivisions in 4/4)");
             snap.addActionListener(e->{
                 String option=(String)snap.getSelectedItem();
                 if(option != null)roll.setSnapDivisor(Integer.parseInt(option.substring(2)));
             });
             snap.setMaximumSize(new Dimension(83,25));
             roll.setSnapDivisor(16);editing.add(snap);
+            highlightKey.setToolTipText("Auto detects the scale; a manual key only changes piano roll shading.");
+            highlightKey.setMaximumSize(new Dimension(110,25));
+            highlightKey.addActionListener(e->{
+                String key=(String)highlightKey.getSelectedItem(); roll.setHighlightKey(key); refreshed();
+                if(!syncingHighlightKey)highlightKeyChanged.accept(key);
+            });
             editing.addSeparator();
             editing.add(new JLabel("Velocity: "));
             JSpinner velocity = new JSpinner(new SpinnerNumberModel(90,1,127,1));
@@ -146,11 +164,22 @@ public final class NoteEditorApp {
             if(bridge==null){
                 editing.addSeparator();editing.add(playButton);editing.add(stopButton);
             }
+            editing.add(Box.createHorizontalGlue());
+            editing.addSeparator();
+            onlyAudible.setEnabled(kind==NoteDocument.Kind.ABC && bridge!=null);
+            onlyAudible.setToolTipText(kind==NoteDocument.Kind.ABC && bridge!=null
+                ? "In Display all parts, hide parts excluded by Song Parts solo/mute. Single-part view is unaffected."
+                : "Available in the project ABC piano roll, where Song Parts solo/mute is defined.");
+            onlyAudible.addActionListener(e->{roll.setShowOnlyAudible(onlyAudible.isSelected());refreshed();});
+            editing.add(onlyAudible);
+            editing.addSeparator();
+            editing.add(new JLabel("Highlight key: "));
+            editing.add(highlightKey);
             controls.add(editing,BorderLayout.NORTH);
             add(controls,BorderLayout.NORTH);
-            allParts.addActionListener(e->{roll.setShowAllParts(allParts.isSelected());});
+            allParts.addActionListener(e->{roll.setShowAllParts(allParts.isSelected());refreshed();});
             layers.addActionListener(e->{if(doc!=null&&layers.getSelectedIndex()>=0){
-                stopLocalPlayback();roll.setDocument(doc,layers.getSelectedIndex());roll.fitFullPitchRange();
+                stopLocalPlayback();roll.setDocument(doc,layers.getSelectedIndex());
                 refreshed();
             }});
             layers.setRenderer(new DefaultListCellRenderer(){
@@ -187,6 +216,7 @@ public final class NoteEditorApp {
             scroller.setColumnHeaderView(roll.createStickyRuler());
             scroller.setRowHeaderView(roll.createStickyKeyboard());
             roll.setOnZoom(()->{
+                initialFitPending=false; // Never overwrite a user-initiated zoom.
                 if(scroller.getColumnHeader()!=null){
                     scroller.getColumnHeader().getView().revalidate();scroller.getColumnHeader().revalidate();
                 }
@@ -196,6 +226,14 @@ public final class NoteEditorApp {
                 }
             });
             add(scroller,BorderLayout.CENTER);
+            // A document may be loaded into a hidden tab/card before layout.
+            // Fit once, when the real viewport is available, not on each selection.
+            addHierarchyListener(e->{
+                if((e.getChangeFlags() & java.awt.event.HierarchyEvent.SHOWING_CHANGED)!=0 && isShowing())fitView();
+            });
+            scroller.getViewport().addComponentListener(new java.awt.event.ComponentAdapter(){
+                @Override public void componentResized(java.awt.event.ComponentEvent e){fitView();}
+            });
             JPanel bottom=new JPanel(new BorderLayout());
             bottom.add(status,BorderLayout.CENTER);
             bottom.add(new JLabel("Drag header = scrub  |  Ctrl+wheel = XY zoom  |  Box-select on empty grid  |  Shift = add  |  Space = play  "),BorderLayout.EAST);
@@ -211,9 +249,15 @@ public final class NoteEditorApp {
         public void setNoteCreationMouseGesture(boolean enabled, int modifiers) {
             roll.setNoteCreationMouseGesture(enabled, modifiers);
         }
-        public void fitView(){SwingUtilities.invokeLater(()->{roll.fitFullPitchRange();
-            if(scroller.getRowHeader()!=null){scroller.getRowHeader().getView().revalidate();scroller.getRowHeader().repaint();}
-        });}
+        /** Initialize the pitch range once per loaded document; cached views retain zoom. */
+        public void fitView(){
+            if(!initialFitPending)return;
+            SwingUtilities.invokeLater(()->{
+                if(!initialFitPending || !isShowing() || scroller.getViewport().getHeight()<=2)return;
+                initialFitPending=false;
+                roll.fitFullPitchRange();
+            });
+        }
         /** Used only by the embedded view; standalone retains its own player. */
         public void setSharedTransport(TransportBridge bridge){
             // The parent Maestro window handles Space globally. Do not also
@@ -316,6 +360,14 @@ public final class NoteEditorApp {
             applyPartPlaybackState();
             roll.repaint();
         }
+        /** Synchronize the full Song Parts snapshot in one operation. */
+        public void setPartMuteSoloStates(java.util.Map<Integer,boolean[]> states){
+            partPlaybackState.clear();
+            states.forEach((number,flags)->partPlaybackState.put(number,flags.clone()));
+            roll.setPartMuteSoloStates(partPlaybackState);
+            applyPartPlaybackState();
+            refreshed();
+        }
         private void applyPartPlaybackState(){
             if(doc==null||kind!=NoteDocument.Kind.ABC)return;
             int part=scope.getSelectedIndex()==1?-1:layers.getSelectedIndex();
@@ -415,7 +467,7 @@ public final class NoteEditorApp {
                 doc=incoming;layers.removeAllItems();
                 for(NoteDocument.Layer layer:doc.layers)layers.addItem(layerDisplayName(layer));
                 layers.setSelectedIndex(0);roll.setDocument(doc,0);roll.setPlayheadTick(0);
-                SwingUtilities.invokeLater(roll::fitFullPitchRange);
+                initialFitPending=true;fitView();
                 lastDirectory=file.getParentFile();refreshed();
             }catch(Exception ex){JOptionPane.showMessageDialog(parent,ex.getMessage(),"Cannot open file",JOptionPane.ERROR_MESSAGE);}
         }
@@ -527,7 +579,7 @@ public final class NoteEditorApp {
         private void refreshed(){
             if(doc==null)return;
             int index=Math.max(0,layers.getSelectedIndex());
-            status.setText("Detected key: "+roll.getDetectedKey()+" • "+(doc.isDirty()?"Modified • ":"")+doc.sourceFile.getName()+" • "+
+            status.setText((HighlightKey.AUTO.equals(roll.getHighlightKey())?"Detected key: "+roll.getDetectedKey():"Highlight key: "+roll.getEffectiveHighlightKey()+" (manual; detected "+roll.getDetectedKey()+")")+" • "+(doc.isDirty()?"Modified • ":"")+doc.sourceFile.getName()+" • "+
                     doc.layer(index).notes.size()+" notes • "+doc.layers.size()+" layers • "+roll.selectionSize()+" selected"+
                     (bridge!=null?" • Save edits to MSX":" • Export As writes a separate file"));
             roll.revalidate();roll.repaint();

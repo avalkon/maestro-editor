@@ -175,6 +175,9 @@ public class AbcSong implements IDiscardable, AbcMetadataSource {
     /** Optional routing of authored piano-roll tracks to one or more Song Parts.
      * Missing entry means assigned to the originating part (legacy behavior). */
     private volatile Map<Integer,Set<Integer>> authoredTrackRouting = Map.of();
+    private String highlightKey="Auto";
+    public String getHighlightKey(){return highlightKey;}
+    public void setHighlightKey(String key){highlightKey=com.digero.maestro.noteedit.HighlightKey.normalize(key);}
     public Map<Integer,Set<Integer>> getAuthoredTrackRouting() { return authoredTrackRouting; }
     /** Compatibility helpers for callers treating imported sources as a group.
      * Actual assignment state belongs to each individual AbcPart source track. */
@@ -691,6 +694,7 @@ public class AbcSong implements IDiscardable, AbcMetadataSource {
             Map<Integer,Boolean> legacyOriginalSelections = new LinkedHashMap<>();
             Element editorElement = XmlUtil.selectSingleElement(songEle, "noteEditor");
             if (editorElement != null) {
+                setHighlightKey(editorElement.getAttribute("highlightKey"));
                 Element partSnapshot = XmlUtil.selectSingleElement(editorElement, "abc");
                 Element midiSnapshot = XmlUtil.selectSingleElement(editorElement, "midi");
                 if (partSnapshot != null) noteEditorAbc = partSnapshot.getTextContent();
@@ -1315,9 +1319,10 @@ public class AbcSong implements IDiscardable, AbcMetadataSource {
             composition.setAttribute("measures",Integer.toString(initialCompositionMeasures));
             composition.setAttribute("key",compositionKey);
         }
-        if (noteEditorAbc != null || noteEditorMidiBase64 != null || !noteEditorDeltas.isEmpty() || !authoredTrackRouting.isEmpty()) {
+        if (noteEditorAbc != null || noteEditorMidiBase64 != null || !noteEditorDeltas.isEmpty() || !authoredTrackRouting.isEmpty() || !"Auto".equals(highlightKey)) {
             Element editor = (Element) songEle.appendChild(doc.createElement("noteEditor"));
             editor.setAttribute("version", "3");
+            editor.setAttribute("highlightKey",highlightKey);
             editor.setAttribute("perTrackImportedSelection", "true");
             for(var entry : getNoteEditorDeltas().entrySet()) {
                 Element part = (Element)editor.appendChild(doc.createElement("partDelta"));
@@ -2738,6 +2743,7 @@ public class AbcSong implements IDiscardable, AbcMetadataSource {
         this.noteEditorAbc = other.noteEditorAbc;
         this.noteEditorDeltas = other.noteEditorDeltas;
         this.authoredTrackRouting = other.authoredTrackRouting;
+        this.highlightKey=other.highlightKey;
         this.noteEditorDeltasLegacyPitch = other.noteEditorDeltasLegacyPitch;
         this.noteEditorMidiBase64 = other.noteEditorMidiBase64;
 		this.sourceAbcBPM = other.sourceAbcBPM;

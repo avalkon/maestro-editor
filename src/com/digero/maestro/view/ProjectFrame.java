@@ -1390,6 +1390,14 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
 
 	}
 
+    private void changeRollHighlightKey(String key){
+        if(abcSong==null)return;
+        abcSong.setHighlightKey(key);
+        if(midiRollEditor!=null)midiRollEditor.setHighlightKey(key);
+        if(abcRollEditor!=null)abcRollEditor.setHighlightKey(key);
+        setAbcSongModified(true);
+    }
+
     /** The selected Song Part determines the checkbox's destination. No
      * imported MIDI track numbers or section settings are changed. An empty
      * destination set is deliberately retained so unassigned notes remain in
@@ -3965,8 +3973,10 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
     /** Changes to Solo/Mute are playback filters, not deletions in the editable ABC. */
     private void syncRollMuteSolo(){
         if(abcRollEditor==null || abcSong==null)return;
+        java.util.Map<Integer,boolean[]> states=new java.util.HashMap<>();
         for(AbcPart part:abcSong.getParts())
-            abcRollEditor.setPartMuteSolo(part.getPartNumber(),part.isMuted(),part.isSoloed());
+            states.put(part.getPartNumber(),new boolean[]{part.isMuted(),part.isSoloed()});
+        abcRollEditor.setPartMuteSoloStates(states);
         applyRollPlaybackScope();
     }
     /** Refresh ONLY from Maestro's current final generated arrangement (never source tracks). */
@@ -4157,6 +4167,8 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
                             com.digero.maestro.noteedit.NoteDocument.Kind.MIDI,ProjectFrame.this,bridge);
                         midiRollEditor.load(files[0]);
                         midiRollEditor.useEmbeddedMode();
+                        midiRollEditor.setHighlightKey(current.getHighlightKey());
+                        midiRollEditor.setOnHighlightKeyChanged(ProjectFrame.this::changeRollHighlightKey);
                         midiRollEditor.setSharedTransport(makeRollTransport(false));
                         midiRollEditor.setMasterAudioControls(ProjectFrame.this::getVolume,ProjectFrame.this::getPan);
                         rollModeHost.add(midiRollEditor,"midiRoll");
@@ -4170,6 +4182,8 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
                         // overlapping unisons, instead of serializing ABC on
                         // every gesture (which can be lossy or unsupported).
                         abcRollEditor.useEmbeddedMode();
+                        abcRollEditor.setHighlightKey(current.getHighlightKey());
+                        abcRollEditor.setOnHighlightKeyChanged(ProjectFrame.this::changeRollHighlightKey);
                         if(current.isCompositionMode())
                             abcRollEditor.setMinimumMeasures(current.getInitialCompositionMeasures());
                         abcRollEditor.useSongPartsSelection();

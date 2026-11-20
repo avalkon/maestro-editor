@@ -2,6 +2,7 @@ package com.digero.maestro.noteedit;
 
 import javax.swing.*;
 import java.awt.*;
+import java.awt.font.GlyphVector;
 import java.awt.event.*;
 import java.util.*;
 import java.util.List;
@@ -9,18 +10,57 @@ import java.util.List;
 /** Multi-part piano roll with marquee selection, one-axis drag editing and two-axis zoom. */
 public final class PianoRollPanel extends JComponent {
     private static final int TOP=24, KEY_WIDTH=64;
+    private static final String[] PITCH_NAMES={"C","C#","D","Eb","E","F","F#","G","Ab","A","Bb","B"};
+    private static final int MIN_KEY_LABEL_SIZE=9, MAX_KEY_LABEL_SIZE=12;
+    private static final Color NOTE_LABEL_COLOR=new Color(15,26,43);
+    private static String pitchName(int pitch){return PITCH_NAMES[pitch%12]+(pitch/12-1);}
+    private record NoteLabel(GlyphVector glyph, Rectangle ink) {}
+    /** Choose the largest readable label that fits the note's interior. */
+    private static NoteLabel fittingNoteLabel(Graphics2D g,int pitch,int width,int height){
+        if(width<1 || height<1)return null;
+        Font base=g.getFont();
+        for(int size=MAX_KEY_LABEL_SIZE;size>=MIN_KEY_LABEL_SIZE;size--){
+            GlyphVector glyph=base.deriveFont((float)size).createGlyphVector(g.getFontRenderContext(),pitchName(pitch));
+            Rectangle ink=glyph.getVisualBounds().getBounds();
+            if(ink.width<=width && ink.height<=height)return new NoteLabel(glyph,ink);
+        }
+        return null;
+    }
     private int rowHeight=18, quarterWidth=85;
     private NoteDocument document;
     private int layerIndex, snapDivisor=16;
-    private boolean showAllParts;
+    private boolean showAllParts, showOnlyAudible;
     private final java.util.Map<Integer,boolean[]> partStates=new java.util.HashMap<>();
     public void setPartMuteSolo(int partNumber,boolean muted,boolean soloed){
-        partStates.put(partNumber,new boolean[]{muted,soloed});repaint();
+        partStates.put(partNumber,new boolean[]{muted,soloed});
+        audibilityChanged();
+    }
+    /** Replace the complete snapshot so deleted/renumbered solos cannot hide parts. */
+    public void setPartMuteSoloStates(Map<Integer,boolean[]> states){
+        partStates.clear();
+        states.forEach((number,flags)->partStates.put(number,flags.clone()));
+        audibilityChanged();
     }
     public boolean isPartAudible(int partNumber){
         boolean[] state=partStates.getOrDefault(partNumber,new boolean[2]);
-        if(state[0])return false;
-        return partStates.values().stream().noneMatch(a->a[1]) || state[1];
+        // Match AbcPart.isActive() and the shared preview sequencer: solo wins.
+        if(state[1])return true;
+        return !state[0] && partStates.values().stream().noneMatch(a->a[1]);
+    }
+    private boolean audibleFilterActive(){
+        return document!=null && document.kind==NoteDocument.Kind.ABC && showAllParts && showOnlyAudible;
+    }
+    public void setShowOnlyAudible(boolean enabled){
+        showOnlyAudible=enabled;
+        audibilityChanged();
+    }
+    public boolean isShowingOnlyAudible(){return showOnlyAudible;}
+    private void audibilityChanged(){
+        if(audibleFilterActive()){
+            Set<Integer> visible=new HashSet<>(visibleLayers());
+            selected.removeIf(s->!visible.contains(s.layer()));
+        }
+        repaint();
     }
     private record Selection(int layer, UUID id) {}
     private record Hit(int layer, EditableNote note) {}
@@ -31,10 +71,19 @@ public final class PianoRollPanel extends JComponent {
     private java.util.function.BiConsumer<EditableNote,NoteDocument.Layer> onAudition=(n,l)->{};
     private int[] detectedScale = {0,2,4,5,7,9,11};
     private String detectedKey="C major";
+    private String highlightKey=HighlightKey.AUTO;
+    private int[] manualScale;
+    public void setHighlightKey(String key) {
+        highlightKey=HighlightKey.normalize(key);
+        manualScale=HighlightKey.AUTO.equals(highlightKey)?null:HighlightKey.scale(highlightKey);
+        repaint();
+    }
+    public String getHighlightKey(){return highlightKey;}
+    public String getEffectiveHighlightKey(){return manualScale==null?detectedKey:highlightKey;}
     private Point anchor, pointer;
     private Rectangle marquee;
     private int previewPitch;
-    private long previewTick, playheadTick;
+    private long previewTick, playheadTick, dragGridIndex;
     private boolean dragging, resizing, seeking, selectingBox;
     private boolean noteClickEnabled;
     private int noteClickModifiers;
@@ -217,6 +266,10 @@ public final class PianoRollPanel extends JComponent {
                 onClipboardMessage.accept("Cannot paste: destination is missing one or more copied parts");
                 return false;
             }
+            if(audibleFilterActive() && !visibleLayers().contains(target)){
+                onClipboardMessage.accept("Cannot paste into a hidden part; disable Show only audible or use single-part view");
+                return false;
+            }
             mappedLayers.put(e.layer(),target);
         }
         long base=snapped(playheadTick);
@@ -250,7 +303,7 @@ public final class PianoRollPanel extends JComponent {
     public void fitFullPitchRange(){
         JViewport v=(JViewport)SwingUtilities.getAncestorOfClass(JViewport.class,this);
         if(v!=null){ rowHeight=Math.max(3,Math.min(18,(v.getHeight()-2)/128));
-            revalidate();repaint(); v.setViewPosition(new Point(v.getViewPosition().x,0)); }
+            revalidate();repaint();onZoom.run(); v.setViewPosition(new Point(v.getViewPosition().x,0)); }
     }
     public void setSelectedVelocity(int velocity){
         if(document==null||selected.isEmpty())return;
@@ -278,23 +331,34 @@ public final class PianoRollPanel extends JComponent {
                     g.setColor(new Color(27,30,38));g.fillRect(clip.x,clip.y,clip.width,clip.height);
                     int first=Math.min(127,Math.max(0,127-(clip.y-TOP)/rowHeight+2));
                     int last=Math.max(0,127-(clip.y+clip.height-TOP)/rowHeight-2);
+                    // Measure actual ink, not the font's nominal line height. The
+                    // latter includes leading and descender space unused by pitch names.
+                    Font baseFont=g.getFont();
+                    Font labelFont=baseFont.deriveFont((float)MIN_KEY_LABEL_SIZE);
+                    boolean labelAll=false;
+                    for(int size=MAX_KEY_LABEL_SIZE;size>=MIN_KEY_LABEL_SIZE;size--){
+                        Font candidate=baseFont.deriveFont((float)size);
+                        // Contains every character used in the MIDI pitch labels.
+                        Rectangle ink=candidate.createGlyphVector(g.getFontRenderContext(),
+                                "CDEFGAB#b-0123456789").getVisualBounds().getBounds();
+                        if(ink.height<=rowHeight-1){labelFont=candidate;labelAll=true;break;}
+                    }
+                    g.setFont(labelFont);
                     for(int pitch=first;pitch>=last;pitch--){
                         int yy=y(pitch);
                         boolean black=Set.of(1,3,6,8,10).contains(pitch%12);
                         g.setColor(black?new Color(49,54,66):new Color(73,79,91));
                         g.fillRect(0,yy,KEY_WIDTH,rowHeight);
                         g.setColor(new Color(28,31,38));g.drawLine(0,yy,KEY_WIDTH,yy);
-                        // At the default full-range zoom individual rows are too short
-                        // for readable text. Label octave C rows, and show more when zoomed in.
-                        boolean label=pitch%12==0 || rowHeight>=16;
-                        if(label){
-                            int fontSize=rowHeight>=12?Math.min(12,rowHeight-2):9;
-                            String[] names={"C","C#","D","Eb","E","F","F#","G","Ab","A","Bb","B"};
-                            String name=names[pitch%12]+(pitch/12-1);
-                            g.setFont(g.getFont().deriveFont((float)fontSize));
+                        // At extreme zoom-out retain octave landmarks; otherwise
+                        // show every pitch as soon as a legible font fits the row.
+                        if(pitch%12==0 || labelAll){
+                            String name=pitchName(pitch);
+                            GlyphVector glyph=labelFont.createGlyphVector(g.getFontRenderContext(),name);
+                            Rectangle ink=glyph.getVisualBounds().getBounds();
+                            int baseline=yy+1+(rowHeight-1-ink.height)/2-ink.y;
                             g.setColor(new Color(222,228,238));
-                            int baseline=yy+Math.max(fontSize,Math.min(rowHeight-1,(rowHeight+fontSize)/2));
-                            g.drawString(name,5,baseline);
+                            g.drawGlyphVector(glyph,5,baseline);
                         }
                     }
                 } finally {g.dispose();}
@@ -344,7 +408,7 @@ public final class PianoRollPanel extends JComponent {
     private void detectKey(){
         if(document==null)return;
         long[] weight=new long[12];
-        for(int i:visibleLayers())for(EditableNote n:document.layer(i).notes)
+        for(int i:viewScopeLayers())for(EditableNote n:document.layer(i).notes)
             weight[n.pitch()%12]+=Math.max(1,n.end()-n.start());
         int[] major={0,2,4,5,7,9,11},minor={0,2,3,5,7,8,10};
         String[] names={"C","C#","D","Eb","E","F","F#","G","Ab","A","Bb","B"};
@@ -360,7 +424,7 @@ public final class PianoRollPanel extends JComponent {
                 detectedKey=names[root]+(mode==0?" major":" minor");}
         }
     }
-    private boolean inScale(int note){for(int p:detectedScale)if(note%12==p)return true;return false;}
+    private boolean inScale(int note){for(int p:manualScale==null?detectedScale:manualScale)if(note%12==p)return true;return false;}
     public void setOnSeek(Runnable cb){onSeek=cb;}
     public void setOnTogglePlayback(Runnable cb){onTogglePlayback=cb;}
     public void setDocument(NoteDocument doc,int index){document=doc;layerIndex=index;selected.clear();detectKey();revalidate();repaint();}
@@ -379,25 +443,36 @@ public final class PianoRollPanel extends JComponent {
     /** A divisor is a fraction of the CURRENT MEASURE, not a quarter-note beat. */
     public int getSnapDivisor(){return snapDivisor;}
     private long measure(){return document.measureTicks(layerIndex);}
-    private long gridTick(long index){return Math.max(0,Math.round(index * (double)measure()/snapDivisor));}
+    private long rawGridTick(long index){return Math.round(index * (double)measure()/snapDivisor);}
+    private long gridTick(long index){return Math.max(0,rawGridTick(index));}
     private long snapped(long t){return gridTick(Math.round(t*snapDivisor/(double)measure()));}
     /** Clicking anywhere inside a grid cell creates its note at the LEFT edge,
      * rather than switching to the next cell at the halfway point. Use the
      * unrounded mouse coordinate to avoid a half-tick boundary error. */
-    private long snappedNotePlacement(int pixelX) {
+    private long notePlacementIndex(int pixelX) {
         double tickPosition = Math.max(0, (pixelX - KEY_WIDTH) / scale());
-        return gridTick((long)Math.floor(tickPosition * snapDivisor / measure() + 1e-9));
+        return (long)Math.floor(tickPosition * snapDivisor / measure() + 1e-9);
     }
-    private long step(){return Math.max(1,Math.round(measure()/(double)snapDivisor));}
+    /** Translate by grid cells, not a repeatedly rounded cell duration. Keep
+     * the original relative offsets of a multiselection or an off-grid note. */
+    private long gridDragDelta(double ticks) {
+        long cells=Math.round(ticks*snapDivisor/measure());
+        return rawGridTick(dragGridIndex+cells)-rawGridTick(dragGridIndex);
+    }
     private double scale(){return quarterWidth/(double)document.ppq;}
     private int x(long tick){return KEY_WIDTH+(int)Math.round(tick*scale());}
     private long tick(int px){return Math.max(0,Math.round((px-KEY_WIDTH)/scale()));}
     private int y(int pitch){return TOP+(127-pitch)*rowHeight;}
     private int pitch(int py){return Math.max(0,Math.min(127,127-(py-TOP)/rowHeight));}
-    private List<Integer> visibleLayers(){
-        if(document==null)return List.of();
+    private List<Integer> viewScopeLayers(){
+        if(document==null || document.layers.isEmpty())return List.of();
         if(!showAllParts)return List.of(Math.max(0,Math.min(layerIndex, document.layers.size()-1)));
         List<Integer> ids=new ArrayList<>();for(int i=0;i<document.layers.size();i++)ids.add(i);
+        return ids;
+    }
+    private List<Integer> visibleLayers(){
+        List<Integer> ids=viewScopeLayers();
+        if(audibleFilterActive())ids.removeIf(i->!isPartAudible(document.layer(i).partNumber));
         return ids;
     }
     private List<EditableNote> notes(){return document==null?List.of():document.layer(layerIndex).notes;}
@@ -409,9 +484,13 @@ public final class PianoRollPanel extends JComponent {
     }
     public Color getPartColor(int layer){return document==null?Color.GRAY:colorFor(layer);}
     @Override public Dimension getPreferredSize(){
-        long max=0;for(int i:visibleLayers())for(EditableNote n:document.layer(i).notes)max=Math.max(max,n.end());
-        if(document!=null && !document.layers.isEmpty())
-            max=Math.max(max,(long)minimumMeasureCount * document.measureTicks(layerIndex));
+        // A common song timeline avoids clamping the horizontal viewport when
+        // switching from a long part to a shorter (or empty) part.
+        long max=0;
+        if(document!=null)for(int i=0;i<document.layers.size();i++){
+            for(EditableNote n:document.layer(i).notes)max=Math.max(max,n.end());
+            max=Math.max(max,(long)minimumMeasureCount * document.measureTicks(i));
+        }
         double w=document==null?1:scale();
         return new Dimension((int)Math.min(200000,Math.max(1200,KEY_WIDTH+(max+(document==null?0:document.ppq*8L))*w)),TOP+128*rowHeight);
     }
@@ -422,7 +501,7 @@ public final class PianoRollPanel extends JComponent {
         NoteDocument.Layer layer=document.layer(h.layer);
         boolean playable=document.kind!=NoteDocument.Kind.ABC ||
             LotroPatch.isPlayableSoundingPitch(layer.instrumentName,h.note.pitch(),layer.abcPitchShift);
-        return layer.name+" | Pitch "+h.note.pitch()+" | Tick "+h.note.start()+"-"+h.note.end()+
+        return layer.name+" | Pitch "+pitchName(h.note.pitch())+" (MIDI "+h.note.pitch()+") | Tick "+h.note.start()+"-"+h.note.end()+
                (playable?"":" | OUTSIDE LOTRO PLAYABLE RANGE");
     }
     @Override protected void paintComponent(Graphics g0){
@@ -472,7 +551,16 @@ public final class PianoRollPanel extends JComponent {
                         playable?base.darker().darker():new Color(255,153,158));
                     g.setStroke(active?new BasicStroke(2):new BasicStroke(1));
                     g.drawRoundRect(xx,yy+2,width-1,rowHeight-4,4,4);
-                    if(width>28 && rowHeight>12){g.setColor(new Color(15,26,43));g.drawString(Integer.toString(n.pitch()),xx+5,yy+Math.min(14,rowHeight-3));}
+                    // Label the sounding pitch, including the pitch shown during a drag.
+                    // Measure the full name, including accidentals and octave, rather
+                    // than relying on a fixed MIDI-number width threshold.
+                    NoteLabel label=fittingNoteLabel(g,p,width-10,rowHeight-5);
+                    if(label!=null){
+                        Rectangle ink=label.ink();
+                        int baseline=yy+3+(rowHeight-5-ink.height)/2-ink.y;
+                        g.setColor(NOTE_LABEL_COLOR);
+                        g.drawGlyphVector(label.glyph(),xx+5-ink.x,baseline);
+                    }
                 }
             }
             int playX=x(playheadTick);
@@ -509,6 +597,7 @@ public final class PianoRollPanel extends JComponent {
         if(e.isShiftDown()) { if(!selected.add(key)) selected.remove(key); }
         else if(!selected.contains(key)){selected.clear();selected.add(key);}
         resizing=x(h.note.end())-e.getX()<8&&x(h.note.end())-e.getX()>=-3;
+        dragGridIndex=Math.round((resizing?h.note.end():h.note.start())*snapDivisor/(double)measure());
         onAudition.accept(h.note,document.layer(h.layer));
         repaint();
     }
@@ -525,7 +614,7 @@ public final class PianoRollPanel extends JComponent {
         int dx=e.getX()-anchor.x,dy=e.getY()-anchor.y;
         if(Math.abs(dx)<3&&Math.abs(dy)<3&&!dragging)return;
         dragging=true;
-        previewTick=Math.round((dx/scale())/step())*step();
+        previewTick=gridDragDelta(dx/scale());
         previewPitch=resizing?0:-Math.round(dy/(float)rowHeight);
         repaint();
     }
@@ -558,9 +647,14 @@ public final class PianoRollPanel extends JComponent {
     }
     private void add(MouseEvent e){
         if(document==null || hit(e.getPoint())!=null)return;
-        long start=snappedNotePlacement(e.getX()),length=step();
+        if(audibleFilterActive() && !visibleLayers().contains(layerIndex)){
+            onClipboardMessage.accept("Selected part is hidden; disable Show only audible or use single-part view to add notes");
+            return;
+        }
+        long cell=notePlacementIndex(e.getX());
+        long start=gridTick(cell),end=Math.max(start+1,gridTick(cell+1));
         int channel=notes().isEmpty()?0:notes().getFirst().channel();
-        EditableNote note=EditableNote.create(pitch(e.getY()),90,channel,start,start+length);
+        EditableNote note=EditableNote.create(pitch(e.getY()),90,channel,start,end);
         document.edit(layerIndex,list->list.add(note));
         selected.clear();selected.add(new Selection(layerIndex,note.id()));
         // notifyEdit may stop the old playback/synth. Sound the new note AFTER it.
