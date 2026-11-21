@@ -282,32 +282,89 @@ public final class AbcDocumentIO {
     }
     public static String toText(NoteDocument doc) throws IOException {
         if(doc.kind!=NoteDocument.Kind.ABC)throw new IllegalArgumentException("Not ABC");
-        StringBuilder result=new StringBuilder(doc.abcPreamble);
+        // The generated ABC preamble belongs to the legacy MIDI exporter. An
+        // ABC-only composition has no source MIDI duration, so it initially
+        // reports 0:00 even when the authored piano roll contains minutes of
+        // music. Use the longest exported part here instead of leaving that
+        // visibly incorrect songbook metadata in the final ABC.
+        String duration=exportDuration(doc);
+        String preamble=doc.abcPreamble;
+        if(Pattern.compile("(?m)^%%song-duration\\s+.*$").matcher(preamble).find())
+            preamble=preamble.replaceFirst("(?m)^%%song-duration\\s+.*$",
+                Matcher.quoteReplacement("%%song-duration    " + duration));
+        StringBuilder result=new StringBuilder(preamble);
         for(NoteDocument.Layer layer:doc.layers) {
             if(!layer.edited) { result.append(layer.abcSource); continue; }
             String header=layer.abcHeader;
             String meter = field(header, "M", "4/4");
             int bpm = layer.abcTempo;
             long abcUnitDenominator = organicUnitDenominator(bpm, meter);
-            // The 960-PPQ editor grid rounds a 60 ms note to 85 ticks at
-            // Q:89, which is only 59.691 ms if written using L:1/32.
-            // Instead write durations in approximately one-microsecond units.
+            // Retain the original K: field and its accidentals; changing Gm
+            // to C maj merely to look like legacy output would change pitches.
             if (Pattern.compile("(?m)^L:.*$").matcher(header).find())
                 header=header.replaceFirst("(?m)^L:.*$","L: 1/" + abcUnitDenominator);
             else
                 header=header.replaceFirst("(?m)^K:","L: 1/" + abcUnitDenominator + "\nK:");
-            // Retain the requested key signature. Explicit naturals in render()
-            // prevent the signature from changing the pitch of edited notes.
+            if(!header.contains("%%part-name ") && !directive(preamble,"song-title","").isBlank())
+                header=standardPartHeader(header,preamble,duration,layer);
             int[] signature=keySignature(field(header,"K","C"));
-            // Unplayable notes remain in the MSX editor deltas; omit them ONLY
-            // from rendered ABC. This must agree with red-note highlighting.
             List<EditableNote> playable = layer.notes.stream()
-                .filter(note -> isPlayableForExport(layer,note))
-                .toList();
-            result.append(header).append(render(playable, measureTicks(meter),layer.abcPitchShift,bpm,signature));
+                .filter(note -> isPlayableForExport(layer,note)).toList();
+            boolean comments = !"true".equalsIgnoreCase(directive(preamble,"reduced-file-size","false"));
+            result.append(header).append(render(playable, measureTicks(meter),
+                layer.abcPitchShift,bpm,signature,comments));
         }
         return result.toString();
     }
+
+    /** The usual Maestro part header, including metadata duplicated for ABC
+     *  players and songbook indexers. Only synthesized authored headers are
+     *  upgraded; generated/imported headers are already in this format. */
+    private static String standardPartHeader(String old,String preamble,String duration,
+                                             NoteDocument.Layer layer) {
+        String part=field(old,"T",layer.name);
+        String title=directive(preamble,"song-title","");
+        String composer=directive(preamble,"song-composer","");
+        String transcriber=directive(preamble,"song-transcriber","");
+        String instrument=directive(old,"made-for",layer.instrumentName);
+        String pan=directive(old,"user-pan","auto");
+        StringBuilder header=new StringBuilder();
+        header.append("X: ").append(field(old,"X",Integer.toString(layer.partNumber))).append('\n');
+        header.append("T: ").append(title).append(" (").append(duration)
+              .append(") - ").append(part).append('\n');
+        header.append("%%part-name ").append(part).append('\n');
+        header.append("%%made-for ").append(instrument).append('\n');
+        header.append("%%user-pan ").append(pan).append('\n');
+        if(!composer.isBlank()) header.append("C: ").append(composer).append('\n');
+        if(!transcriber.isBlank()) header.append("Z: ").append(transcriber).append('\n');
+        header.append("M: ").append(field(old,"M","4/4")).append('\n');
+        header.append("Q: ").append(layer.abcTempo).append('\n');
+        header.append("L: ").append(field(old,"L","1/8")).append('\n');
+        header.append("K: ").append(field(old,"K","C")).append('\n');
+        return header.toString();
+    }
+
+    private static String exportDuration(NoteDocument doc) {
+        long maxSeconds=0;
+        for(NoteDocument.Layer layer:doc.layers)
+            for(EditableNote note:layer.notes) {
+                long micros=microsAtTick(note.end(),layer.abcTempo);
+                maxSeconds=Math.max(maxSeconds,Math.ceilDiv(micros,1_000_000L));
+            }
+        String existing=directive(doc.abcPreamble,"song-duration","");
+        String[] fields=existing.split(":");
+        try {
+            long prior=0;
+            if(fields.length==2) prior=Long.parseLong(fields[0])*60+Long.parseLong(fields[1]);
+            if(fields.length==3) prior=Long.parseLong(fields[0])*3600+
+                    Long.parseLong(fields[1])*60+Long.parseLong(fields[2]);
+            maxSeconds=Math.max(maxSeconds,prior);
+        } catch(NumberFormatException ignored) { }
+        if(maxSeconds>=3600) return String.format(Locale.US,"%d:%02d:%02d",
+            maxSeconds/3600,(maxSeconds/60)%60,maxSeconds%60);
+        return String.format(Locale.US,"%d:%02d",maxSeconds/60,maxSeconds%60);
+    }
+
     /** Shared export/preview range check; saving an MSX intentionally does NOT
      *  use this restriction, so unplayable notes can be corrected later. */
     public static boolean isPlayableForExport(NoteDocument.Layer layer,EditableNote note) {
@@ -388,8 +445,135 @@ public final class AbcDocumentIO {
         return result;
     }
 
+    /**
+     * LOTRO's 60 ms floor applies to each serialized ABC token, including the
+     * pieces of a sustained chord and tiny rests. A note release close to the
+     * next attack or barline is not itself a new attack; it can be shifted
+     * slightly to make the pieces playable without displacing that attack.
+     *
+     * All note starts and barlines are pinned here. Only release-only edges
+     * are adjusted. Real short note-on intervals remain for the existing
+     * minimum-duration handling, because they cannot be represented exactly.
+     */
+    private static List<EditableNote> regularizeReleaseBoundaries(
+            List<EditableNote> notes, long bar, int bpm) {
+        if (notes.isEmpty()) return notes;
+        final long minimum = Math.max(1, (long)Math.floor(
+                LOTRO_MIN_DURATION_MICROS * PPQ * (double)bpm / MICROS_PER_MINUTE));
+        long finish = notes.stream().mapToLong(EditableNote::end).max().orElse(0L);
+        TreeSet<Long> pinned = new TreeSet<>();
+        pinned.add(0L); pinned.add(finish);
+        for (long t=bar; t<finish; t+=bar) pinned.add(t);
+        for (EditableNote note:notes) pinned.add(note.start());
+        TreeMap<Long,List<EditableNote>> releases = new TreeMap<>();
+        for (EditableNote note:notes) {
+            if (!pinned.contains(note.end()))
+                releases.computeIfAbsent(note.end(), ignored->new ArrayList<>()).add(note);
+        }
+        if (releases.isEmpty()) return notes;
+        Map<Long,Long> moved = new HashMap<>();
+        long left = pinned.first();
+        for (long right:pinned.tailSet(left,false)) {
+            NavigableMap<Long,List<EditableNote>> within =
+                releases.subMap(left,false,right,false);
+            if (!within.isEmpty()) {
+                // No two distinct tokens may be closer than the minimum.
+                int capacity=(int)Math.max(0,Math.min(within.size(),
+                    (right-left)/minimum-1));
+                List<ReleaseGroup> groups=new ArrayList<>();
+                for (var entry:within.entrySet())
+                    groups.add(new ReleaseGroup(entry.getKey(),entry.getValue()));
+                // Select the lowest-distortion merger when more release edges
+                // occur between attacks than the one-voice ABC stream can fit.
+                while (groups.size()>capacity) {
+                    double best=Double.POSITIVE_INFINITY;
+                    int index=-1, destination=-1;
+                    for (int i=0;i<groups.size();i++) {
+                        ReleaseGroup group=groups.get(i);
+                        if (i==0 && group.canEndAt(left)) {
+                            double cost=group.cost(left)-group.cost(group.median());
+                            if(cost<best) {best=cost;index=i;destination=-1;}
+                        }
+                        if (i==groups.size()-1) {
+                            double cost=group.cost(right)-group.cost(group.median());
+                            if(cost<best) {best=cost;index=i;destination=groups.size();}
+                        }
+                        if (i+1<groups.size()) {
+                            ReleaseGroup next=groups.get(i+1);
+                            double cost=group.mergedCost(next)-group.cost(group.median())
+                                -next.cost(next.median());
+                            if(cost<best) {best=cost;index=i;destination=i+1;}
+                        }
+                    }
+                    if(index<0) break;
+                    ReleaseGroup chosen=groups.get(index);
+                    if(destination==-1) {chosen.mapAll(moved,left);groups.remove(index);}
+                    else if(destination==groups.size()) {chosen.mapAll(moved,right);groups.remove(index);}
+                    else {groups.get(destination).absorb(chosen);groups.remove(index);}
+                }
+                for (int i=0;i<groups.size();i++) {
+                    ReleaseGroup group=groups.get(i);
+                    long earliest=left+(long)(i+1)*minimum;
+                    long latest=right-(long)(groups.size()-i)*minimum;
+                    long target=Math.max(earliest,Math.min(latest,group.median()));
+                    if(i>0)target=Math.max(target,groups.get(i-1).target+minimum);
+                    group.target=target;
+                    group.mapAll(moved,target);
+                }
+            }
+            left=right;
+        }
+        List<EditableNote> result=new ArrayList<>(notes.size());
+        for (EditableNote note:notes) {
+            long end=moved.getOrDefault(note.end(),note.end());
+            // A release never precedes the start of its own note. A tiny
+            // true note cannot be repaired by release-only adjustment.
+            result.add(end>note.start()?note.resize(end):note);
+        }
+        return result;
+    }
+    private static final class ReleaseGroup {
+        final List<Long> moments=new ArrayList<>();
+        final List<EditableNote> notes=new ArrayList<>();
+        long target;
+        ReleaseGroup(long at,List<EditableNote> ending) {
+            moments.add(at);notes.addAll(ending);
+        }
+        void absorb(ReleaseGroup other) {
+            moments.addAll(other.moments);notes.addAll(other.notes);
+        }
+        long median() {
+            List<Long> sorted=new ArrayList<>(moments);
+            Collections.sort(sorted);
+            int n=sorted.size();
+            return n%2==1?sorted.get(n/2):
+                (sorted.get(n/2-1)/2+sorted.get(n/2)/2
+                +((sorted.get(n/2-1)&1)+(sorted.get(n/2)&1))/2);
+        }
+        double cost(long target) {
+            double sum=0;
+            for(long at:moments) sum+=Math.abs((double)at-target);
+            return sum;
+        }
+        double mergedCost(ReleaseGroup other) {
+            List<Long> sorted=new ArrayList<>(moments);
+            sorted.addAll(other.moments); Collections.sort(sorted);
+            long mid=sorted.get((sorted.size()-1)/2);
+            double sum=0;
+            for(long at:sorted) sum+=Math.abs((double)at-mid);
+            return sum;
+        }
+        boolean canEndAt(long target) {
+            for (EditableNote note:notes) if(note.start()>=target) return false;
+            return true;
+        }
+        void mapAll(Map<Long,Long> moved,long to) {
+            for(long original:moments) moved.put(original,to);
+        }
+    }
+
     private static String render(List<EditableNote> notes, long bar, int pitchShift, int bpm,
-                                 int[] keySignature) throws IOException {
+                                 int[] keySignature, boolean comments) throws IOException {
         TreeSet<Long> edges=new TreeSet<>(); edges.add(0L);
         long finish=0;
         for(EditableNote n:notes){edges.add(n.start());edges.add(n.end());finish=Math.max(finish,n.end());}
@@ -435,6 +619,10 @@ public final class AbcDocumentIO {
         // This is the same single-pitch limitation as LOTRO's ABC playback,
         // rather than aborting the entire export (or losing the edit in MSX).
         adjustedNotes = forAbcSingleVoice(adjustedNotes);
+        // A short interval caused solely by a note-off must not push every
+        // subsequent note-on forward by LOTRO's 60 ms per-token limit. Move
+        // release boundaries locally (never edit the MSX or attack times).
+        adjustedNotes = regularizeReleaseBoundaries(adjustedNotes,bar,bpm);
         edges.clear(); edges.add(0L);
         for (EditableNote n:adjustedNotes) { edges.add(n.start()); edges.add(n.end()); }
         for(long t=bar;t<finish;t+=bar)edges.add(t);
@@ -455,9 +643,19 @@ public final class AbcDocumentIO {
         for(int i=0;i<ticks.size()-1;i++) {
             long start=ticks.get(i),end=ticks.get(i+1);
             if(start>=finish)break;
+            // Maestro's organic writer groups its event streams in blocks of
+            // eight and annotates them with elapsed time and approximate bar.
+            // Break PHYSICAL lines only: artificial ABC barlines would reset
+            // accidental scope and could reintroduce the sharp/natural bug.
             if(start>0 && start%bar==0) {
-                out.append("|\n");
+                out.append("| ");
                 barAccidentals.clear();
+            }
+            if(i>0 && i%8==0) {
+                out.append('\n');
+                if(comments) out.append(String.format(Locale.US,
+                    "%%  (%s) bar %.1f\n",formatEventTime(microsAtTick(start,bpm)),
+                    1.0 + start / (double)bar));
             }
             for(EditableNote n:noteEnds.getOrDefault(start,List.of())) active.remove(n.pitch(),n);
             for(EditableNote n:noteStarts.getOrDefault(start,List.of())) {
@@ -477,7 +675,7 @@ public final class AbcDocumentIO {
                     int[] levels={4,16,32,48,64,80,96,112,127};
                     int best=0;for(int j=1;j<levels.length;j++)
                         if(Math.abs(target-levels[j])<Math.abs(target-levels[best]))best=j;
-                    out.append('+').append(markings[best]).append('+');
+                    out.append('+').append(markings[best]).append("+ ");
                     currentVelocity=levels[best];
                 }
             }
@@ -509,6 +707,13 @@ public final class AbcDocumentIO {
         out.append("|]\n\n");
         return out.toString();
     }
+    private static String formatEventTime(long micros) {
+        long seconds=Math.ceilDiv(micros,1_000_000L);
+        if(seconds>=3600) return String.format(Locale.US,"%d:%02d:%02d",
+            seconds/3600,(seconds/60)%60,seconds%60);
+        return String.format(Locale.US,"%d:%02d",seconds/60,seconds%60);
+    }
+
     private static String pitch(int p,int[] keySignature,Map<Integer,Integer> barAccidentals)
             throws IOException {
         if (p < 0 || p > 127) throw new IOException("Edited pitch outside LOTRO ABC range");

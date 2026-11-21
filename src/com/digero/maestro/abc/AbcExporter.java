@@ -77,6 +77,37 @@ public class AbcExporter {
 	public int stereoPan = 100;// zero is mono, 100 is very wide.
 	private int firstBarNumber;
 
+    /** Captured BEFORE the legacy converter silently prunes >6-note chords. */
+    private final List<ChordLimitReport.Issue> chordLimitIssues = new ArrayList<>();
+    private final Set<String> chordLimitSeen = new HashSet<>();
+
+    public List<ChordLimitReport.Issue> getChordLimitIssues() {
+        return ChordLimitReport.combine(chordLimitIssues);
+    }
+
+    private void recordChordLimit(AbcPart part, Chord chord) {
+        long count = chord.getNotes().stream().filter(n -> n.note != Note.REST)
+            .map(n -> n.note.id).distinct().count();
+        if (count <= ChordLimitReport.LIMIT) return;
+        int bar = Math.max(1, qtm.tickToBarNumber(chord.getStartTick()) - firstBarNumber + 1);
+        String identity=part.getPartNumber()+":"+bar;
+        // Retain highest polyphony observed for this part and bar.
+        if (chordLimitSeen.add(identity))
+            chordLimitIssues.add(new ChordLimitReport.Issue(part.getPartNumber(),part.getTitle(),
+                bar,(int)count,true));
+        else {
+            for (int i=0;i<chordLimitIssues.size();i++) {
+                ChordLimitReport.Issue old=chordLimitIssues.get(i);
+                if (old.partNumber()==part.getPartNumber() && old.bar()==bar && count>old.notes()) {
+                    chordLimitIssues.set(i,new ChordLimitReport.Issue(part.getPartNumber(),
+                        part.getTitle(),bar,(int)count,true));
+                    break;
+                }
+            }
+        }
+    }
+
+
 	private int lastChannelUsedInPreview = -1;
     private long startTickForCountIn = 0L;
     public MiscSettings dissonancePrefs = null;
@@ -539,6 +570,8 @@ public class AbcExporter {
 	}
 
 	public PolyphonyHistogram exportToAbc(OutputStream os, boolean delayEnabled, String appName, int minDelay) throws AbcConversionException {
+        chordLimitIssues.clear();
+        chordLimitSeen.clear();
 		// AbcExporter.GRID_STATS.reset();
 		// accountForSustain is true so that songbooks wont stop their timer before last note has finished sounding.
 		// lengthenToBar is false for opposite reason, so reporting the correct duration to songbooks.
@@ -1986,7 +2019,8 @@ public class AbcExporter {
 				assert !curChord.isRest();
 				curChord.add(ne);
 			} else {
-				List<AbcNoteEvent> deadnotes = curChord.prune(part.getInstrument().sustainable,
+				recordChordLimit(part,curChord);
+			List<AbcNoteEvent> deadnotes = curChord.prune(part.getInstrument().sustainable,
 						part.getInstrument() == LotroInstrument.BASIC_DRUM, part.getInstrument().isPercussion, part);
 				removeNotes(events, deadnotes, part);
                 prunedNotes += deadnotes.size();
@@ -2061,6 +2095,7 @@ public class AbcExporter {
 			// before the next chord starts.
 
 			// Last chord needs to be pruned as that hasn't happened yet.
+			recordChordLimit(part,curChord);
 			List<AbcNoteEvent> deadnotes = curChord.prune(part.getInstrument().sustainable,
 					part.getInstrument() == LotroInstrument.BASIC_DRUM, part.getInstrument().isPercussion, part);
 			removeNotes(events, deadnotes, part);// we need to set the pruned flag for last chord too.
@@ -2673,7 +2708,8 @@ public class AbcExporter {
 				
 				// We prune after Repair zero duration notes, so they get chance to not be pruned.
                 // And after removing zero dura notes in chords to they dont take slots in pruning.
-				List<AbcNoteEvent> deadnotes = curChord.pruneWithMicros(part.getInstrument().sustainable,
+				recordChordLimit(part,curChord);
+			List<AbcNoteEvent> deadnotes = curChord.pruneWithMicros(part.getInstrument().sustainable,
 						part.getInstrument() == LotroInstrument.BASIC_DRUM, part.getInstrument().isPercussion,
 						part, useRestToShortenChords);
                 if (assertionsEnabled && OUTPUT_METRICS) prunedAway.addAll(deadnotes);
@@ -3389,6 +3425,7 @@ public class AbcExporter {
 			
 			
 			// Last chord needs to be pruned as that hasn't happened yet. Since its the last we don't pass useRestToShortenChords.
+			recordChordLimit(part,curChord);
 			List<AbcNoteEvent> deadnotes = curChord.pruneWithMicros(part.getInstrument().sustainable,
 					part.getInstrument() == LotroInstrument.BASIC_DRUM, part.getInstrument().isPercussion, part, false);
             if (assertionsEnabled && OUTPUT_METRICS) prunedAway.addAll(deadnotes);
@@ -6260,7 +6297,8 @@ public class AbcExporter {
 					continue;
 				}
 	    			    		
-				List<AbcNoteEvent> deadnotes = curChord.prune(part.getInstrument().sustainable,
+				recordChordLimit(part,curChord);
+			List<AbcNoteEvent> deadnotes = curChord.prune(part.getInstrument().sustainable,
 						part.getInstrument() == LotroInstrument.BASIC_DRUM, part.getInstrument().isPercussion, part, useRestToShortenChords);
 				breakTies(deadnotes);
 				eventSegments.removeAll(deadnotes);
@@ -6284,7 +6322,8 @@ public class AbcExporter {
 	    }
 	    if (curChord != null) {
 	    	unmixRestAndNotes(part, eventSegments, curChord, useRestToShortenChords);
-	    	List<AbcNoteEvent> deadnotes = curChord.prune(part.getInstrument().sustainable,
+	    	recordChordLimit(part,curChord);
+			List<AbcNoteEvent> deadnotes = curChord.prune(part.getInstrument().sustainable,
 					part.getInstrument() == LotroInstrument.BASIC_DRUM, part.getInstrument().isPercussion, part);
 	    	breakTies(deadnotes);
 	    	eventSegments.removeAll(deadnotes);

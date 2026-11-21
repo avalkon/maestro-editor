@@ -23,8 +23,12 @@ public final class NoteDocument {
         String abcSource;
         String abcHeader;
         int abcTempo = 120;
+        /** ABC part's effective quarter-note tempo for export diagnostics. */
+        public int abcTempo() { return abcTempo; }
         final List<javax.sound.midi.MidiEvent> unmatchedMidiEvents = new ArrayList<>();
         boolean edited;
+        /** Whether this editor layer replaces the generated ABC part. */
+        public boolean isEdited() { return edited; }
         Layer(String name) { this.name = name; }
         public String toString() { return name + " (" + notes.size() + " notes)"; }
     }

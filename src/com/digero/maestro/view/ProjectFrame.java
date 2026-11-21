@@ -4478,37 +4478,84 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
         */
 	}
 
-    private class AbcExportWorker extends SwingWorker<Void, Void> {
-
+    /** Render into a sibling temporary file. Nothing overwrites the destination
+     *  until the user has seen any 7+ note chord warnings and chosen to proceed. */
+    private record AbcPreflight(
+        java.util.List<com.digero.maestro.abc.ChordLimitReport.Issue> chords,
+        java.util.List<com.digero.maestro.abc.TimingLimitReport.Issue> timing) {}
+    private class AbcExportWorker extends SwingWorker<AbcPreflight, Void> {
         private final File exportFile;
+        private Path stagedFile;
 
         public AbcExportWorker(File exportFile) {
             this.exportFile = exportFile;
         }
 
-        /**
-         * This runs on non-Swing thread
-         */
         @Override
-        protected Void doInBackground() throws IOException, AbcConversionException {
-            abcSong.exportAbc(exportFile, MaestroMain.APP_NAME);
-            return null;
+        protected AbcPreflight doInBackground()
+                throws IOException, AbcConversionException {
+            Path absolute = exportFile.toPath().toAbsolutePath();
+            stagedFile=Files.createTempFile(absolute.getParent(), ".maestro-chord-preflight-", ".abc");
+            abcSong.exportAbc(stagedFile.toFile(), MaestroMain.APP_NAME);
+            return new AbcPreflight(abcSong.getLastExportChordLimitIssues(),
+                abcSong.getLastExportTimingLimitIssues());
         }
 
-        /**
-         * This runs on Swing thread
-         */
+        private boolean confirmExportLimits(AbcPreflight report) {
+            if(report.chords().isEmpty() && report.timing().isEmpty()) return true;
+            StringBuilder details=new StringBuilder();
+            if(!report.chords().isEmpty()) {
+                details.append("CHORDS — LOTRO supports at most six simultaneous notes in a part:\n");
+                for(var issue:report.chords()) details.append(" • ").append(issue.label()).append('\n');
+                details.append('\n');
+            }
+            if(!report.timing().isEmpty()) {
+                details.append("TIMING — LOTRO cannot precisely play notes or attacks under 60 ms:\n");
+                for(var issue:report.timing()) details.append(" • ").append(issue.label()).append('\n');
+                details.append('\n');
+            }
+            details.append("Cancel to edit the indicated bars before exporting.\n")
+                .append("Export anyway accepts unavoidable timing approximation and/or legacy note pruning.\n")
+                .append("Your MSX notes remain unchanged. Existing ABC is not overwritten if you cancel.");
+            int rows=report.chords().size()+report.timing().size();
+            JTextArea area=new JTextArea(details.toString(), Math.min(22,8+rows),82);
+            area.setEditable(false);
+            area.setCaretPosition(0);
+            area.setLineWrap(true);
+            area.setWrapStyleWord(true);
+            area.setFont(new Font(Font.MONOSPACED, Font.PLAIN, area.getFont().getSize()));
+            JScrollPane scroll=new JScrollPane(area);
+            scroll.setPreferredSize(new Dimension(850,Math.min(480,170+rows*18)));
+            Object[] choices={"Cancel — fix notes", "Export anyway"};
+            return JOptionPane.showOptionDialog(ProjectFrame.this, scroll,
+                "LOTRO ABC export compatibility warnings", JOptionPane.DEFAULT_OPTION,
+                JOptionPane.WARNING_MESSAGE, null, choices, choices[0]) == 1;
+        }
+
+        private void installStagedFile() throws IOException {
+            Path target=exportFile.toPath().toAbsolutePath();
+            try {
+                Files.move(stagedFile,target,java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                    java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+            } catch (java.nio.file.AtomicMoveNotSupportedException e) {
+                Files.move(stagedFile,target,java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            }
+            stagedFile=null;
+        }
+
         @Override
         protected void done() {
             try {
-                get(); // get exceptions from doInBackground()
-
+                var issues=get();
+                if (!confirmExportLimits(issues)) return;
+                installStagedFile();
                 songExportSettingsPanel.setExportSuccessfulLabelText(abcSong.getExportFile().getName());
-                songExportSettingsPanel.setExportSuccessfulLabelToolTipText(UIText.get("maestro.exported.0", abcSong.getExportFile().getName()));
+                songExportSettingsPanel.setExportSuccessfulLabelToolTipText(
+                    UIText.get("maestro.exported.0", abcSong.getExportFile().getName()));
                 songExportSettingsPanel.setExportSuccessfulLabelVisible(true);
-
                 if (exportLabelHideTimer == null) {
-                    exportLabelHideTimer = new Timer(8000, e -> songExportSettingsPanel.setExportSuccessfulLabelVisible(false));
+                    exportLabelHideTimer = new Timer(8000,
+                        e -> songExportSettingsPanel.setExportSuccessfulLabelVisible(false));
                     exportLabelHideTimer.setRepeats(false);
                 }
                 exportLabelHideTimer.stop();
@@ -4520,23 +4567,15 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
             } catch (ExecutionException e) {
                 Throwable cause = e.getCause() != null ? e.getCause() : e;
                 log.log(Level.WARNING, "Error when exporting ABC", cause);
-                if (cause instanceof FileNotFoundException) {
-                    JOptionPane.showMessageDialog(ProjectFrame.this, UIText.get("maestro.failed.to.create.file.0", cause.getMessage()),
-							UIText.get("maestro.failed.to.create.file"), JOptionPane.ERROR_MESSAGE);
-                } else if (cause instanceof IOException || cause instanceof AbcConversionException) {
-                    JOptionPane.showMessageDialog(ProjectFrame.this, cause.getMessage(), UIText.get("maestro.error"),
-                            JOptionPane.ERROR_MESSAGE);
-                } else {
-                    // Catch any other unexpected errors
-                    JOptionPane.showMessageDialog(ProjectFrame.this, UIText.get("maestro.an.unexpected.error.occurred.0", cause.getMessage()),
-							UIText.get("maestro.error"), JOptionPane.ERROR_MESSAGE);
-                }
-
-            } catch (Exception e) {
-                log.log(Level.SEVERE, "Error exporting ABC", e);
-                JOptionPane.showMessageDialog(ProjectFrame.this, UIText.get("maestro.an.unexpected.ui.error.occurred.0", e.getMessage()),
-						UIText.get("maestro.error"), JOptionPane.ERROR_MESSAGE);
+                JOptionPane.showMessageDialog(ProjectFrame.this, cause.getMessage(),
+                    UIText.get("maestro.error"), JOptionPane.ERROR_MESSAGE);
+            } catch (IOException e) {
+                log.log(Level.WARNING,"Could not finalize ABC export",e);
+                JOptionPane.showMessageDialog(ProjectFrame.this,e.getMessage(),
+                    "ABC export failed",JOptionPane.ERROR_MESSAGE);
             } finally {
+                if (stagedFile != null) try { Files.deleteIfExists(stagedFile); }
+                    catch (IOException cleanup) { log.log(Level.WARNING,"Cannot remove staged ABC",cleanup); }
                 setUIEnabled(true);
             }
         }

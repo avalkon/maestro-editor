@@ -1425,6 +1425,17 @@ public class AbcSong implements IDiscardable, AbcMetadataSource {
 	 *
 	 * @return polyphony max if called by AutoExporter
 	 */
+    /** Snapshot for the most recent ABC render, including notes the legacy
+     *  conversion would have pruned before the ABC text was written. */
+    private volatile java.util.List<ChordLimitReport.Issue> lastExportChordLimitIssues = java.util.List.of();
+    public java.util.List<ChordLimitReport.Issue> getLastExportChordLimitIssues() {
+        return lastExportChordLimitIssues;
+    }
+    private volatile java.util.List<TimingLimitReport.Issue> lastExportTimingLimitIssues = java.util.List.of();
+    public java.util.List<TimingLimitReport.Issue> getLastExportTimingLimitIssues() {
+        return lastExportTimingLimitIssues;
+    }
+
     public int exportAbc(File exportFile,String appName) throws IOException, AbcConversionException {
         return exportAbcInternal(exportFile,appName,true);
     }
@@ -1445,17 +1456,38 @@ public class AbcSong implements IDiscardable, AbcMetadataSource {
 			}
 		}
         java.io.ByteArrayOutputStream generated = new java.io.ByteArrayOutputStream();
-        PolyphonyHistogram poly = getAbcExporter().exportToAbc(generated, delayEnabled, appName, minDelay);
+        AbcExporter exporter=getAbcExporter();
+        PolyphonyHistogram poly = exporter.exportToAbc(generated, delayEnabled, appName, minDelay);
+        String finalAbc=generated.toString(StandardCharsets.UTF_8);
+        lastExportTimingLimitIssues=java.util.List.of();
         if (includeEditorNotes && (compositionMode || !noteEditorDeltas.isEmpty())) {
             Map<Integer,NoteEditorDelta.Part> routed = routedNoteEditorDeltas();
             String baseline = com.digero.maestro.noteedit.CompositionAbc.forExport(
-                generated.toString(StandardCharsets.UTF_8), getEditorPartSpecs(),
-                routed, compositionMode);
-            String combined = NoteEditorDelta.mergeAbc(baseline, routed);
-            Files.writeString(exportFile.toPath(), combined, StandardCharsets.UTF_8);
-        } else {
-            Files.write(exportFile.toPath(), generated.toByteArray());
+                finalAbc, getEditorPartSpecs(), routed, compositionMode);
+            if (!routed.isEmpty()) {
+                // Inspect the ORIGINAL editor notes before the serializer
+                // adjusts 60 ms constraints; the final ABC alone hides which
+                // authored attacks were necessarily shifted.
+                com.digero.maestro.noteedit.NoteDocument editor =
+                    com.digero.maestro.noteedit.AbcDocumentIO.readText(baseline);
+                NoteEditorDelta.apply(editor,routed);
+                lastExportTimingLimitIssues=TimingLimitReport.find(editor);
+                finalAbc=com.digero.maestro.noteedit.AbcDocumentIO.toText(editor);
+            } else finalAbc=baseline;
         }
+        if (includeEditorNotes) {
+            java.util.List<ChordLimitReport.Issue> problems = new java.util.ArrayList<>(exporter.getChordLimitIssues());
+            try {
+                problems.addAll(ChordLimitReport.findInAbc(finalAbc));
+            } catch (IOException parseError) {
+                // Preserve compatibility with older ABC dialects the general
+                // converter can export even when the piano roll cannot import them.
+                java.util.logging.Logger.getLogger(AbcSong.class.getName()).warning(
+                    "Could not inspect ABC chord sizes: "+parseError.getMessage());
+            }
+            lastExportChordLimitIssues=ChordLimitReport.combine(problems);
+        }
+        Files.writeString(exportFile.toPath(), finalAbc, StandardCharsets.UTF_8);
         if (firstExportTime == null) firstExportTime = new Date();
         if (appName.contains(AbcTools.APP_NAME)) {
             poly.sumUp(this);

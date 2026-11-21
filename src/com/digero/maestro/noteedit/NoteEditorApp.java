@@ -494,6 +494,36 @@ public final class NoteEditorApp {
             if(out.equals(doc.sourceFile)){JOptionPane.showMessageDialog(parent,"Choose a different file.");return;}
             if(out.exists()&&JOptionPane.showConfirmDialog(parent,"Overwrite "+out.getName()+"?","Overwrite",
                     JOptionPane.YES_NO_OPTION)!=JOptionPane.YES_OPTION)return;
+            // The standalone editor must warn just like ProjectFrame's export.
+            // Checking in-memory notes before any file write prevents the user
+            // from unknowingly replacing an existing ABC with unplayable chords.
+            if (kind == NoteDocument.Kind.ABC) {
+                var excess=com.digero.maestro.abc.ChordLimitReport.find(doc);
+                var timing=com.digero.maestro.abc.TimingLimitReport.find(doc);
+                if(!excess.isEmpty() || !timing.isEmpty()) {
+                    StringBuilder message=new StringBuilder();
+                    if(!excess.isEmpty()) {
+                        message.append("CHORDS — more than six simultaneous notes:\n");
+                        for(var problem:excess) message.append(problem.label()).append('\n');
+                    }
+                    if(!timing.isEmpty()) {
+                        message.append("\nTIMING — notes or onsets under LOTRO's 60 ms minimum:\n");
+                        for(var problem:timing) message.append(problem.label()).append('\n');
+                    }
+                    message.append("\nCancel to edit the indicated bars. ")
+                        .append("Export anyway may approximate rapid attacks or remove excess chord notes.");
+                    javax.swing.JTextArea text=new javax.swing.JTextArea(message.toString(),
+                        Math.min(22,6+excess.size()+timing.size()),85);
+                    text.setEditable(false);
+                    text.setLineWrap(true);
+                    text.setWrapStyleWord(true);
+                    text.setCaretPosition(0);
+                    String[] choices={"Cancel — fix notes","Export anyway"};
+                    if(JOptionPane.showOptionDialog(parent,new javax.swing.JScrollPane(text),
+                        "LOTRO ABC export compatibility warnings",JOptionPane.DEFAULT_OPTION,
+                        JOptionPane.WARNING_MESSAGE,null,choices,choices[0]) != 1)return;
+                }
+            }
             try{
                 if(kind==NoteDocument.Kind.MIDI)MidiDocumentIO.write(doc,out);else AbcDocumentIO.write(doc,out);
                 lastDirectory=out.getParentFile();doc.markSaved();refreshed();
