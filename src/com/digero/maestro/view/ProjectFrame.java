@@ -1520,6 +1520,10 @@ public class ProjectFrame extends JFrame implements TableLayoutConstants, ICompi
         SequencerWrapper transport = abcPreviewMode ? abcSequencer : sequencer;
         if (!transport.isLoaded()) return;
         transport.setTickPosition(abcPreviewMode ? abcPreviewStartTick : 0L);
+        if (rollActive) {
+            var editor = rollSourceAbc ? abcRollEditor : midiRollEditor;
+            if (editor != null) editor.revealSongStart();
+        }
         scheduleUiRefresh();
     }
     /** Move the active playhead while running, paused or stopped. */

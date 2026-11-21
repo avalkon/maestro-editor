@@ -122,7 +122,19 @@ public final class NoteEditorApp {
             }
             files.addSeparator();files.add(layerLabel);files.add(layers);
             controls.add(files,BorderLayout.SOUTH);
-            JToolBar editing=new JToolBar();editing.setFloatable(false);
+            JToolBar.Separator snapVelocitySeparator=new JToolBar.Separator();
+            snapVelocitySeparator.setName("snapVelocitySeparator");
+            JToolBar editing=new JToolBar(){
+                @Override public void doLayout(){
+                    super.doLayout();
+                    if(snapVelocitySeparator.getWidth()>0 && scroller.getParent()!=null){
+                        Point separator=SwingUtilities.convertPoint(snapVelocitySeparator,
+                            snapVelocitySeparator.getWidth()/2,0,scroller);
+                        // The floating keyboard starts at the scroll pane inner edge.
+                        roll.setDrumKeyboardWidth(separator.x-scroller.getInsets().left);
+                    }
+                }
+            };editing.setFloatable(false);
             // Compact, single-line toolbar. Maestro's File menu owns Export/Store
             // in embedded mode, and the main transport owns Play and Stop.
 
@@ -142,7 +154,7 @@ public final class NoteEditorApp {
                 String key=(String)highlightKey.getSelectedItem(); roll.setHighlightKey(key); refreshed();
                 if(!syncingHighlightKey)highlightKeyChanged.accept(key);
             });
-            editing.addSeparator();
+            editing.add(snapVelocitySeparator);
             editing.add(new JLabel("Velocity: "));
             JSpinner velocity = new JSpinner(new SpinnerNumberModel(90,1,127,1));
             velocity.addChangeListener(e->{if(doc!=null){roll.setSelectedVelocity((Integer)velocity.getValue());}});
@@ -214,16 +226,13 @@ public final class NoteEditorApp {
             });
             roll.setOnTogglePlayback(this::playOrPause);
             scroller.setColumnHeaderView(roll.createStickyRuler());
-            scroller.setRowHeaderView(roll.createStickyKeyboard());
+            roll.installFloatingKeyboard(scroller.getViewport());
             roll.setOnZoom(()->{
                 initialFitPending=false; // Never overwrite a user-initiated zoom.
                 if(scroller.getColumnHeader()!=null){
                     scroller.getColumnHeader().getView().revalidate();scroller.getColumnHeader().revalidate();
                 }
-                if(scroller.getRowHeader()!=null){
-                    scroller.getRowHeader().getView().revalidate();scroller.getRowHeader().revalidate();
-                    scroller.getRowHeader().repaint();
-                }
+                roll.revalidate();roll.repaint();
             });
             add(scroller,BorderLayout.CENTER);
             // A document may be loaded into a hidden tab/card before layout.
@@ -245,6 +254,7 @@ public final class NoteEditorApp {
         }
         private JButton button(String text,Runnable action){JButton b=new JButton(text);b.addActionListener(e->action.run());return b;}
         public void setMinimumMeasures(int count){roll.setMinimumMeasureCount(count);}
+        public void revealSongStart(){roll.revealSongStart();}
         /** Configure the optional note-creation mouse gesture in both embedded editors. */
         public void setNoteCreationMouseGesture(boolean enabled, int modifiers) {
             roll.setNoteCreationMouseGesture(enabled, modifiers);
@@ -276,6 +286,7 @@ public final class NoteEditorApp {
         public void setOnScopeChanged(Runnable cb){onScopeChanged=java.util.Objects.requireNonNull(cb);}
         /** Drop the in-window polling without changing Maestro's playing state. */
         public void suspendEmbeddedView(){
+            roll.cancelDragInteraction();
             if(sharedTransport!=null)playbackTimer.stop();else stopLocalPlayback();
         }
         public void resumeEmbeddedView(){
@@ -534,11 +545,11 @@ public final class NoteEditorApp {
                 roll.setPlayheadTick(player.position());
             }
             boolean running=sharedTransport!=null?sharedTransport.isRunning():player.isRunning();
-            if(running && followSupplier.getAsBoolean()){
+            if(running && followSupplier.getAsBoolean() && !roll.isDragInteractionActive()){
                 int x=roll.playheadPixel(), left=scroller.getHorizontalScrollBar().getValue();
                 int width=scroller.getViewport().getWidth();
-                if(width>0 && (x>left+(int)(width*0.78) || x<left))
-                    scroller.getHorizontalScrollBar().setValue(Math.max(0,x-width/3));
+                if(width>0 && (x>left+(int)(width*0.78) || x<left+roll.getKeyboardWidth()))
+                    scroller.getHorizontalScrollBar().setValue(Math.max(0,x-Math.max(roll.getKeyboardWidth(),width/3)));
             }
             if(sharedTransport==null){
                 if(!player.isRunning()&&player.position()>=player.tickLength()){stopPlayback();return;}
@@ -582,7 +593,7 @@ public final class NoteEditorApp {
             status.setText((HighlightKey.AUTO.equals(roll.getHighlightKey())?"Detected key: "+roll.getDetectedKey():"Highlight key: "+roll.getEffectiveHighlightKey()+" (manual; detected "+roll.getDetectedKey()+")")+" • "+(doc.isDirty()?"Modified • ":"")+doc.sourceFile.getName()+" • "+
                     doc.layer(index).notes.size()+" notes • "+doc.layers.size()+" layers • "+roll.selectionSize()+" selected"+
                     (bridge!=null?" • Save edits to MSX":" • Export As writes a separate file"));
-            roll.revalidate();roll.repaint();
+            roll.refreshKeyboard();roll.revalidate();roll.repaint();
         }
     }
 }

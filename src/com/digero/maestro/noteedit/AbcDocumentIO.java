@@ -445,13 +445,20 @@ public final class AbcDocumentIO {
             noteEnds.computeIfAbsent(note.end(), ignored->new ArrayList<>()).add(note);
         }
         Map<Integer,EditableNote> active=new TreeMap<>();
+        // ABC accidentals apply to later notes with the same letter and octave
+        // until the barline. They must be tracked independently of the key
+        // signature, including across rests and successive tied segments.
+        Map<Integer,Integer> barAccidentals=new HashMap<>();
         StringBuilder out=new StringBuilder();
         int currentVelocity=90;
         long timingErrorMicros=0;
         for(int i=0;i<ticks.size()-1;i++) {
             long start=ticks.get(i),end=ticks.get(i+1);
             if(start>=finish)break;
-            if(start>0 && start%bar==0)out.append("|\n");
+            if(start>0 && start%bar==0) {
+                out.append("|\n");
+                barAccidentals.clear();
+            }
             for(EditableNote n:noteEnds.getOrDefault(start,List.of())) active.remove(n.pitch(),n);
             for(EditableNote n:noteStarts.getOrDefault(start,List.of())) {
                 if(active.containsKey(n.pitch()))
@@ -484,14 +491,14 @@ public final class AbcDocumentIO {
             if(sounding.isEmpty())out.append('z').append(length);
             else if(sounding.size()==1) {
                 EditableNote n=sounding.getFirst();
-                out.append(pitch(n.pitch()-pitchShift,keySignature)).append(length);
+                out.append(pitch(n.pitch()-pitchShift,keySignature,barAccidentals)).append(length);
                 if(n.end()>end)out.append('-');
             } else {
                 // LOTRO does not accept a length after ']'. Each member of a
                 // chord must carry its own duration, even when all are equal.
                 out.append('[');
                 for(EditableNote n:sounding) {
-                    out.append(pitch(n.pitch()-pitchShift,keySignature)).append(length);
+                    out.append(pitch(n.pitch()-pitchShift,keySignature,barAccidentals)).append(length);
                     if(n.end()>end)out.append('-');
                 }
                 out.append(']');
@@ -502,18 +509,32 @@ public final class AbcDocumentIO {
         out.append("|]\n\n");
         return out.toString();
     }
-    private static String pitch(int p,int[] keySignature) throws IOException {
+    private static String pitch(int p,int[] keySignature,Map<Integer,Integer> barAccidentals)
+            throws IOException {
         if (p < 0 || p > 127) throw new IOException("Edited pitch outside LOTRO ABC range");
         int octave=p/12-1, semitone=p%12;
-        String[] spelling={"C","^C","D","^D","E","F","^F","G","^G","A","^A","B"};
-        String val=spelling[semitone];
-        // When K: G, for example, writing F without an accidental produces F#.
-        // The editor's pitches are absolute, so explicitly naturalize notes
-        // that the key signature would otherwise sharpen or flatten.
+        // The exporter spells chromatic pitches as sharps. Track the natural
+        // pitch (letter + octave), NOT the chromatic MIDI pitch: after ^A,
+        // A in the same measure needs =A even in a key where A is natural.
+        int[] letterForSemitone={0,0,1,1,2,3,3,4,4,5,5,6};
         int[] naturalSemitones={0,2,4,5,7,9,11};
-        for(int i=0;i<naturalSemitones.length;i++)if(semitone==naturalSemitones[i]
-                && keySignature[i]!=0) {val="="+val;break;}
-        if(octave>=4)val=val.toLowerCase(Locale.ROOT);
+        String[] letters={"C","D","E","F","G","A","B"};
+        int letter=letterForSemitone[semitone];
+        int natural=(p/12)*12+naturalSemitones[letter];
+        boolean sharp=semitone!=naturalSemitones[letter];
+        String accidental="";
+        if(sharp) {
+            accidental="^";
+            barAccidentals.put(natural,1);
+        } else {
+            if(barAccidentals.getOrDefault(natural,keySignature[letter])!=0)
+                accidental="=";
+            // An explicit natural cancels both an earlier sharp/flat and
+            // the signature's alteration until the next barline.
+            if(!accidental.isEmpty()) barAccidentals.put(natural,0);
+        }
+        String val=octave>=4?letters[letter].toLowerCase(Locale.ROOT):letters[letter];
+        val=accidental+val;
         for(int i=0;i<Math.abs(octave-(octave>=4?4:3));i++)val+=octave>=4?"'":",";
         return val;
     }

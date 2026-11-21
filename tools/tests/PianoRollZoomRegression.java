@@ -38,8 +38,9 @@ public class PianoRollZoomRegression {
         Path dir=Files.createTempDirectory("maestro-zoom-");
         try {
             String abcText="%abc-2.1\nX:1\nT:Long\nM:4/4\nL:1/8\nK:C\n"+"C2 D2 E2 F2|".repeat(32)+"\n\nX:2\nT:Short\nM:4/4\nL:1/8\nK:C\nC2 D2 E2 F2|\n";
+            String abcInput = args.length>0 && args[0].equals("drums") ? abcText.replace("T:Long\n", "T:Long\n%%made-for Basic Horn\n").replace("T:Short\n", "T:Short\n%%made-for Basic Drum\n") : abcText;
             Path abcFile=dir.resolve("test.abc"),midiFile=dir.resolve("test.mid");
-            Files.writeString(abcFile,abcText);
+            Files.writeString(abcFile,abcInput);
             Sequence sequence=new Sequence(Sequence.PPQ,480);notes(sequence.createTrack(),0,480*128);notes(sequence.createTrack(),0,480);
             MidiSystem.write(sequence,1,midiFile.toFile());
             edt(()->{
@@ -57,7 +58,7 @@ public class PianoRollZoomRegression {
             edt(()->{scroll(abc).getViewport().setViewPosition(new Point(2200,330));expected[0]=view(abc);check(expected[0].pos.x==2200&&expected[0].pos.y==330,"ABC test must be scrolled on both axes");abc.selectPartNumber(2);});
             settle();edt(()->{check(abc.currentPartNumber()==2,"ABC selection");checkView(abc,expected[0],"short ABC part");abc.selectPartNumber(1);});settle();
             edt(()->{checkView(abc,expected[0],"return to ABC part");check(roll(abc).getHighlightKey().equals("D minor"),"manual key retained");
-                try{abc.reloadGeneratedAbc(abcText.replace("T:Short","T:Renamed"),java.util.Map.of());}catch(Exception e){throw new AssertionError(e);}
+                try{abc.reloadGeneratedAbc(abcInput.replace("T:Short","T:Renamed"),java.util.Map.of());}catch(Exception e){throw new AssertionError(e);}
             });settle();edt(()->{checkView(abc,expected[0],"generated ABC refresh");show("arrangement");});settle();
             edt(()->{show("abc");abc.fitView();});settle();edt(()->{checkView(abc,expected[0],"reenter piano roll");show("midi");midi.fitView();});settle();
             edt(()->check(view(midi).size.height<1000,"hidden MIDI tab initial fit"));

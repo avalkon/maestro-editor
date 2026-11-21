@@ -9,18 +9,19 @@ import java.util.List;
 
 /** Multi-part piano roll with marquee selection, one-axis drag editing and two-axis zoom. */
 public final class PianoRollPanel extends JComponent {
-    private static final int TOP=24, KEY_WIDTH=64;
+    private static final int TOP=24, KEY_WIDTH=64, DEFAULT_DRUM_KEY_WIDTH=120;
     private static final String[] PITCH_NAMES={"C","C#","D","Eb","E","F","F#","G","Ab","A","Bb","B"};
     private static final int MIN_KEY_LABEL_SIZE=9, MAX_KEY_LABEL_SIZE=12;
+    private static final Color RULER_BACKGROUND=new Color(32,36,47);
     private static final Color NOTE_LABEL_COLOR=new Color(15,26,43);
     private static String pitchName(int pitch){return PITCH_NAMES[pitch%12]+(pitch/12-1);}
     private record NoteLabel(GlyphVector glyph, Rectangle ink) {}
     /** Choose the largest readable label that fits the note's interior. */
-    private static NoteLabel fittingNoteLabel(Graphics2D g,int pitch,int width,int height){
-        if(width<1 || height<1)return null;
+    private static NoteLabel fittingNoteLabel(Graphics2D g,String text,int width,int height){
+        if(text==null || width<1 || height<1)return null;
         Font base=g.getFont();
         for(int size=MAX_KEY_LABEL_SIZE;size>=MIN_KEY_LABEL_SIZE;size--){
-            GlyphVector glyph=base.deriveFont((float)size).createGlyphVector(g.getFontRenderContext(),pitchName(pitch));
+            GlyphVector glyph=base.deriveFont((float)size).createGlyphVector(g.getFontRenderContext(),text);
             Rectangle ink=glyph.getVisualBounds().getBounds();
             if(ink.width<=width && ink.height<=height)return new NoteLabel(glyph,ink);
         }
@@ -28,6 +29,42 @@ public final class PianoRollPanel extends JComponent {
     }
     private int rowHeight=18, quarterWidth=85;
     private NoteDocument document;
+    private JComponent stickyKeyboard;
+    private JViewport floatingViewport;
+    private DrumLabels.Kit keyboardKit=DrumLabels.Kit.NONE;
+    private int keyboardWidth=KEY_WIDTH, drumKeyboardWidth=DEFAULT_DRUM_KEY_WIDTH;
+    /** Match the wider percussion gutter to the toolbar separator after layout. */
+    void setDrumKeyboardWidth(int width){
+        if(width<=0 || drumKeyboardWidth==width)return;
+        drumKeyboardWidth=width;refreshKeyboard();
+    }
+    void refreshKeyboard(){
+        keyboardKit=document==null || layerIndex<0 || layerIndex>=document.layers.size()
+            ? DrumLabels.Kit.NONE : DrumLabels.keyboardKit(document,document.layer(layerIndex));
+        // Keep the gutter the same width when switching parts in a drum-containing document.
+        int width=DrumLabels.hasDrums(document)?drumKeyboardWidth:KEY_WIDTH;
+        boolean resized=keyboardWidth!=width;
+        keyboardWidth=width;
+        if(stickyKeyboard!=null){
+            if(resized){
+                stickyKeyboard.revalidate();
+                revalidate();
+                if(floatingViewport!=null) floatingViewport.revalidate();
+                positionFloatingKeyboard();
+            }
+            stickyKeyboard.repaint();
+        }
+        repaint();
+    }
+    private String drumKeyName(int pitch){
+        return DrumLabels.name(keyboardKit,pitch,document.layer(layerIndex).abcPitchShift);
+    }
+    private String noteLabel(NoteDocument.Layer layer,EditableNote note,int pitch){
+        DrumLabels.Kit kit=DrumLabels.noteKit(document,layer,note);
+        if(kit==DrumLabels.Kit.NONE)return pitchName(pitch);
+        String name=DrumLabels.name(kit,pitch,layer.abcPitchShift);
+        return name!=null?name:(kit==DrumLabels.Kit.LOTRO?"Unmapped drum":"Drum "+pitch);
+    }
     private int layerIndex, snapDivisor=16;
     private boolean showAllParts, showOnlyAudible;
     private final java.util.Map<Integer,boolean[]> partStates=new java.util.HashMap<>();
@@ -85,6 +122,83 @@ public final class PianoRollPanel extends JComponent {
     private int previewPitch;
     private long previewTick, playheadTick, dragGridIndex;
     private boolean dragging, resizing, seeking, selectingBox;
+    // Store the pointer in viewport coordinates: component coordinates change
+    // as the viewport scrolls, even when the physical mouse stays stationary.
+    private static final int EDGE_ZONE=32, EDGE_MAX_STEP=28;
+    private final javax.swing.Timer edgeTimer=new javax.swing.Timer(25,e->edgeScroll());
+    private Point edgePointer;
+    private JComponent rulerDrag;
+    private Window edgeWindow;
+    private final WindowAdapter edgeWindowListener=new WindowAdapter(){
+        @Override public void windowLostFocus(WindowEvent e){cancelDragInteraction();}
+    };
+
+    boolean isDragInteractionActive(){return anchor!=null || rulerDrag!=null;}
+    private JViewport dragViewport(){
+        return (JViewport)SwingUtilities.getAncestorOfClass(JViewport.class,this);
+    }
+    private void stopEdgeScroll(){
+        edgeTimer.stop();edgePointer=null;
+        if(edgeWindow!=null){edgeWindow.removeWindowFocusListener(edgeWindowListener);edgeWindow=null;}
+    }
+    void cancelDragInteraction(){
+        stopEdgeScroll();rulerDrag=null;anchor=null;pointer=null;marquee=null;
+        dragging=false;resizing=false;seeking=false;selectingBox=false;
+        previewTick=0;previewPitch=0;repaint();
+    }
+    private void trackEdgePointer(MouseEvent e,JViewport viewport){
+        if(viewport==null)return;
+        edgePointer=SwingUtilities.convertPoint(e.getComponent(),e.getPoint(),viewport);
+        if(!edgeTimer.isRunning() && isShowing()){
+            edgeWindow=SwingUtilities.getWindowAncestor(this);
+            if(edgeWindow!=null)edgeWindow.addWindowFocusListener(edgeWindowListener);
+            edgeTimer.start();
+        }
+    }
+    private static int edgeStep(int point,int start,int end){
+        if(end<=start)return 0;
+        int zone=Math.min(EDGE_ZONE,Math.max(1,(end-start)/2));
+        int depth=point<start+zone?point-start-zone:point>end-zone?point-end+zone:0;
+        if(depth==0)return 0;
+        int speed=Math.min(EDGE_MAX_STEP,Math.max(1,(int)Math.round(EDGE_MAX_STEP*Math.abs((double)depth)/zone)));
+        return depth<0?-speed:speed;
+    }
+    private static int clamp(int value,int min,int max){return Math.max(min,Math.min(max,value));}
+    private Point gridDragPoint(JViewport viewport,Point local){
+        Point origin=viewport.getViewPosition();
+        int left=floatingViewport==null?Math.max(0,keyboardWidth-origin.x):keyboardWidth;
+        int right=Math.max(left,viewport.getWidth()-1);
+        int top=Math.max(0,TOP-origin.y),bottom=Math.max(top,viewport.getHeight()-1);
+        return new Point(origin.x+clamp(local.x,left,right),origin.y+clamp(local.y,top,bottom));
+    }
+    private void seekDragAt(int px,JComponent ruler,boolean force){
+        if(document==null)return;
+        long target=snapped(tick(px));
+        if(force || target!=playheadTick){setPlayheadTick(target);onSeek.run();}
+        if(ruler!=null)ruler.repaint();
+    }
+    private void edgeScroll(){
+        if(edgePointer==null || !isDragInteractionActive() || document==null || !isShowing()){
+            cancelDragInteraction();return;
+        }
+        JViewport viewport=dragViewport();
+        if(viewport==null){cancelDragInteraction();return;}
+        Point old=viewport.getViewPosition();
+        boolean horizontalOnly=rulerDrag!=null || seeking || resizing;
+        int left=rulerDrag!=null?0:(floatingViewport==null?Math.max(0,keyboardWidth-old.x):keyboardWidth);
+        int dx=edgeStep(edgePointer.x,left,viewport.getWidth()-1);
+        int dy=horizontalOnly?0:edgeStep(edgePointer.y,Math.max(0,TOP-old.y),viewport.getHeight()-1);
+        Dimension size=viewport.getViewSize(), extent=viewport.getExtentSize();
+        Point next=new Point(clamp(old.x+dx,0,Math.max(0,size.width-extent.width)),
+            clamp(old.y+dy,0,Math.max(0,size.height-extent.height)));
+        if(old.equals(next))return;
+        viewport.setViewPosition(next);
+        if(rulerDrag!=null){
+            seekDragAt(viewport.getViewPosition().x+clamp(edgePointer.x,0,viewport.getWidth()-1),rulerDrag,false);
+        }else{
+            updateDrag(gridDragPoint(viewport,edgePointer));
+        }
+    }
     private boolean noteClickEnabled;
     private int noteClickModifiers;
 
@@ -105,12 +219,17 @@ public final class PianoRollPanel extends JComponent {
                 InputEvent.SHIFT_DOWN_MASK | InputEvent.META_DOWN_MASK;
         return noteClickEnabled && noteClickModifiers != 0 &&
                 (e.getModifiersEx() & allowed) == noteClickModifiers &&
-                SwingUtilities.isLeftMouseButton(e) && e.getX() >= KEY_WIDTH && e.getY() >= TOP;
+                SwingUtilities.isLeftMouseButton(e) && e.getX() >= editableLeft() && e.getY() >= TOP;
     }
 
     public PianoRollPanel() {
         setOpaque(true);
         setFocusable(true);
+        // Swing's synthetic autoscroll events lack our floating-keyboard geometry.
+        setAutoscrolls(false);
+        addHierarchyListener(e->{
+            if((e.getChangeFlags() & HierarchyEvent.SHOWING_CHANGED)!=0 && !isShowing())cancelDragInteraction();
+        });
         setToolTipText("Drag to move/resize; double-click to add; right-click a note to delete; Shift extends box selections.");
         MouseAdapter mouse = new MouseAdapter() {
             @Override public void mousePressed(MouseEvent e) {
@@ -118,7 +237,7 @@ public final class PianoRollPanel extends JComponent {
                 else pressed(e);
             }
             @Override public void mouseDragged(MouseEvent e) { dragged(e); }
-            @Override public void mouseReleased(MouseEvent e) { released(); }
+            @Override public void mouseReleased(MouseEvent e) { if(SwingUtilities.isLeftMouseButton(e))released(); }
             @Override public void mouseClicked(MouseEvent e) {
                 if (e.getClickCount() == 2 && SwingUtilities.isLeftMouseButton(e) && e.getY() >= TOP)
                     add(e); // Always preserve the existing double-click gesture.
@@ -153,8 +272,8 @@ public final class PianoRollPanel extends JComponent {
         addFocusListener(new FocusAdapter(){
             @Override public void focusLost(FocusEvent e){spaceKeyLatch.release();}
         });
-        bind(KeyEvent.VK_HOME,0,"begin",()->{setPlayheadTick(0);onSeek.run();});
-        bind(KeyEvent.VK_ESCAPE,0,"clear",()->{selected.clear();repaint();});
+        bind(KeyEvent.VK_HOME,0,"begin",()->{setPlayheadTick(0);revealSongStart();onSeek.run();});
+        bind(KeyEvent.VK_ESCAPE,0,"clear",this::clearSelection);
     }
     private void bind(int key,int modifiers,String action,Runnable run) {
         getInputMap(WHEN_FOCUSED).put(KeyStroke.getKeyStroke(key,modifiers),action);
@@ -203,7 +322,7 @@ public final class PianoRollPanel extends JComponent {
             keys.put(released,"playRelease");
         }
     }
-    public void clearSelection(){ selected.clear(); repaint(); }
+    public void clearSelection(){ cancelDragInteraction();selected.clear(); repaint(); }
     public void setOnClipboardMessage(java.util.function.Consumer<String> cb){
         onClipboardMessage=java.util.Objects.requireNonNull(cb);
     }
@@ -317,12 +436,56 @@ public final class PianoRollPanel extends JComponent {
         });
         document.editLayers(changes);notifyEdit();
     }
-    /** Fixed horizontal key labels in the scroll pane row header. They scroll vertically
-     *  together with the notes, but never disappear during horizontal panning. */
+    /** Install a keyboard overlay within the scrolling canvas. Its x coordinate
+     * follows the viewport, but its y coordinate remains in pitch-grid space.
+     * The ruler has no row-header corner and can seek over the keyboard area. */
+    void installFloatingKeyboard(JViewport viewport){
+        floatingViewport=viewport;
+        // Blitting would copy the previously painted overlay into the note grid.
+        viewport.setScrollMode(JViewport.SIMPLE_SCROLL_MODE);
+        JComponent keys=createStickyKeyboard();
+        add(keys);
+        keys.addMouseListener(new MouseAdapter(){
+            @Override public void mousePressed(MouseEvent e){requestFocusInWindow();}
+        });
+        keys.addMouseWheelListener(e->{
+            zoom((MouseWheelEvent)SwingUtilities.convertMouseEvent(keys,e,this));
+            e.consume();
+        });
+        viewport.addChangeListener(e->positionFloatingKeyboard());
+        positionFloatingKeyboard();
+    }
+    int getKeyboardWidth(){return keyboardWidth;}
+    /** Return to the horizontal origin without disturbing the vertical zoom/scroll. */
+    void revealSongStart(){
+        if(floatingViewport!=null){
+            Point p=floatingViewport.getViewPosition();
+            floatingViewport.setViewPosition(new Point(0,p.y));
+        }
+    }
+    private int editableLeft(){
+        return keyboardWidth+(floatingViewport==null?0:floatingViewport.getViewPosition().x);
+    }
+    private void positionFloatingKeyboard(){
+        if(floatingViewport==null || stickyKeyboard==null)return;
+        Rectangle bounds=new Rectangle(floatingViewport.getViewPosition().x,0,keyboardWidth,getHeight());
+        if(!bounds.equals(stickyKeyboard.getBounds())){
+            stickyKeyboard.setBounds(bounds);
+            // Repaint both the old overlay area and the newly covered area.
+            floatingViewport.repaint();
+        }
+    }
+    @Override public void doLayout(){positionFloatingKeyboard();}
+    /** Keyboard renderer, also usable independently in rendering tests. */
     public JComponent createStickyKeyboard(){
-        return new JComponent(){
+        stickyKeyboard=new JComponent(){
             @Override public Dimension getPreferredSize(){
-                return new Dimension(KEY_WIDTH, PianoRollPanel.this.getPreferredSize().height);
+                return new Dimension(keyboardWidth, PianoRollPanel.this.getPreferredSize().height);
+            }
+            @Override public String getToolTipText(MouseEvent e){
+                if(keyboardKit==DrumLabels.Kit.NONE || e.getY()<TOP)return null;
+                int p=pitch(e.getY());String name=drumKeyName(p);
+                return (name==null?"Unmapped drum":name)+" ("+pitchName(p)+", MIDI "+p+")";
             }
             @Override protected void paintComponent(Graphics graphics){
                 Graphics2D g=(Graphics2D)graphics.create();
@@ -346,10 +509,23 @@ public final class PianoRollPanel extends JComponent {
                     g.setFont(labelFont);
                     for(int pitch=first;pitch>=last;pitch--){
                         int yy=y(pitch);
-                        boolean black=Set.of(1,3,6,8,10).contains(pitch%12);
+                        boolean black=keyboardKit==DrumLabels.Kit.NONE?Set.of(1,3,6,8,10).contains(pitch%12):pitch%2==1;
                         g.setColor(black?new Color(49,54,66):new Color(73,79,91));
-                        g.fillRect(0,yy,KEY_WIDTH,rowHeight);
-                        g.setColor(new Color(28,31,38));g.drawLine(0,yy,KEY_WIDTH,yy);
+                        g.fillRect(0,yy,getWidth(),rowHeight);
+                        g.setColor(new Color(28,31,38));g.drawLine(0,yy,getWidth(),yy);
+                        if(keyboardKit!=DrumLabels.Kit.NONE){
+                            String name=drumKeyName(pitch);
+                            if(name==null)continue;
+                            g.setFont(baseFont);
+                            NoteLabel label=fittingNoteLabel(g,name,getWidth()-10,rowHeight-1);
+                            if(label!=null){
+                                Rectangle ink=label.ink();
+                                g.setColor(new Color(222,228,238));
+                                g.drawGlyphVector(label.glyph(),5-ink.x,yy+1+(rowHeight-1-ink.height)/2-ink.y);
+                            }
+                            g.setFont(labelFont);
+                            continue;
+                        }
                         // At extreme zoom-out retain octave landmarks; otherwise
                         // show every pitch as soon as a legible font fits the row.
                         if(pitch%12==0 || labelAll){
@@ -364,6 +540,9 @@ public final class PianoRollPanel extends JComponent {
                 } finally {g.dispose();}
             }
         };
+        stickyKeyboard.setOpaque(true);
+        stickyKeyboard.setToolTipText("");
+        return stickyKeyboard;
     }
     /** Ruler is a JScrollPane column header: its playhead remains visible while scrolling vertically. */
     public JComponent createStickyRuler(){
@@ -373,7 +552,7 @@ public final class PianoRollPanel extends JComponent {
                 Graphics2D g=(Graphics2D)graphics.create();
                 try{
                     Rectangle view=g.getClipBounds();
-                    g.setColor(new Color(32,36,47));g.fillRect(view.x,0,view.width,getHeight());
+                    g.setColor(RULER_BACKGROUND);g.fillRect(view.x,0,view.width,getHeight());
                     if(document==null)return;
                     long measure=document.measureTicks(layerIndex);
                     long first=Math.max(0,tick(view.x)/measure);
@@ -391,9 +570,20 @@ public final class PianoRollPanel extends JComponent {
             }
         };
         MouseAdapter mouse=new MouseAdapter(){
-            private void seek(MouseEvent e){if(document!=null){setPlayheadTick(snapped(tick(e.getX())));onSeek.run();ruler.repaint();}}
-            @Override public void mousePressed(MouseEvent e){seek(e);}
-            @Override public void mouseDragged(MouseEvent e){seek(e);}
+            @Override public void mousePressed(MouseEvent e){
+                if(document==null || !SwingUtilities.isLeftMouseButton(e))return;
+                cancelDragInteraction();rulerDrag=ruler;seekDragAt(e.getX(),ruler,true);
+            }
+            @Override public void mouseDragged(MouseEvent e){
+                if(rulerDrag!=ruler || document==null)return;
+                JViewport header=(JViewport)SwingUtilities.getAncestorOfClass(JViewport.class,ruler);
+                trackEdgePointer(e,header);
+                int px=header==null?e.getX():header.getViewPosition().x+clamp(edgePointer.x,0,header.getWidth()-1);
+                seekDragAt(px,ruler,true);
+            }
+            @Override public void mouseReleased(MouseEvent e){
+                if(rulerDrag==ruler && SwingUtilities.isLeftMouseButton(e))cancelDragInteraction();
+            }
         };
         ruler.addMouseListener(mouse);ruler.addMouseMotionListener(mouse);
         addPropertyChangeListener("preferredSize",e->ruler.revalidate());
@@ -427,14 +617,14 @@ public final class PianoRollPanel extends JComponent {
     private boolean inScale(int note){for(int p:manualScale==null?detectedScale:manualScale)if(note%12==p)return true;return false;}
     public void setOnSeek(Runnable cb){onSeek=cb;}
     public void setOnTogglePlayback(Runnable cb){onTogglePlayback=cb;}
-    public void setDocument(NoteDocument doc,int index){document=doc;layerIndex=index;selected.clear();detectKey();revalidate();repaint();}
+    public void setDocument(NoteDocument doc,int index){cancelDragInteraction();document=doc;layerIndex=index;selected.clear();refreshKeyboard();detectKey();revalidate();repaint();}
     private int minimumMeasureCount;
     /** New ABC compositions begin with a usable, empty timeline. */
     public void setMinimumMeasureCount(int bars) {
         minimumMeasureCount = Math.max(0,Math.min(2000,bars));
         revalidate(); repaint();
     }
-    public void setShowAllParts(boolean enabled){showAllParts=enabled;selected.clear();detectKey();revalidate();repaint();}
+    public void setShowAllParts(boolean enabled){cancelDragInteraction();showAllParts=enabled;selected.clear();detectKey();revalidate();repaint();}
     public boolean isShowingAllParts(){return showAllParts;}
     public void setPlayheadTick(long tick) {long normalized=Math.max(0,tick);if(playheadTick!=normalized){playheadTick=normalized;repaint();}}
     public long getPlayheadTick(){return playheadTick;}
@@ -450,7 +640,7 @@ public final class PianoRollPanel extends JComponent {
      * rather than switching to the next cell at the halfway point. Use the
      * unrounded mouse coordinate to avoid a half-tick boundary error. */
     private long notePlacementIndex(int pixelX) {
-        double tickPosition = Math.max(0, (pixelX - KEY_WIDTH) / scale());
+        double tickPosition = Math.max(0, (pixelX - keyboardWidth) / scale());
         return (long)Math.floor(tickPosition * snapDivisor / measure() + 1e-9);
     }
     /** Translate by grid cells, not a repeatedly rounded cell duration. Keep
@@ -460,8 +650,8 @@ public final class PianoRollPanel extends JComponent {
         return rawGridTick(dragGridIndex+cells)-rawGridTick(dragGridIndex);
     }
     private double scale(){return quarterWidth/(double)document.ppq;}
-    private int x(long tick){return KEY_WIDTH+(int)Math.round(tick*scale());}
-    private long tick(int px){return Math.max(0,Math.round((px-KEY_WIDTH)/scale()));}
+    private int x(long tick){return keyboardWidth+(int)Math.round(tick*scale());}
+    private long tick(int px){return Math.max(0,Math.round((px-keyboardWidth)/scale()));}
     private int y(int pitch){return TOP+(127-pitch)*rowHeight;}
     private int pitch(int py){return Math.max(0,Math.min(127,127-(py-TOP)/rowHeight));}
     private List<Integer> viewScopeLayers(){
@@ -492,7 +682,7 @@ public final class PianoRollPanel extends JComponent {
             max=Math.max(max,(long)minimumMeasureCount * document.measureTicks(i));
         }
         double w=document==null?1:scale();
-        return new Dimension((int)Math.min(200000,Math.max(1200,KEY_WIDTH+(max+(document==null?0:document.ppq*8L))*w)),TOP+128*rowHeight);
+        return new Dimension((int)Math.min(200000,Math.max(1200,keyboardWidth+(max+(document==null?0:document.ppq*8L))*w)),TOP+128*rowHeight);
     }
     public void scrollToMiddleC(){scrollRectToVisible(new Rectangle(0,y(72)-rowHeight*12,600,rowHeight*24));}
     @Override public String getToolTipText(MouseEvent e){
@@ -501,7 +691,9 @@ public final class PianoRollPanel extends JComponent {
         NoteDocument.Layer layer=document.layer(h.layer);
         boolean playable=document.kind!=NoteDocument.Kind.ABC ||
             LotroPatch.isPlayableSoundingPitch(layer.instrumentName,h.note.pitch(),layer.abcPitchShift);
-        return layer.name+" | Pitch "+pitchName(h.note.pitch())+" (MIDI "+h.note.pitch()+") | Tick "+h.note.start()+"-"+h.note.end()+
+        DrumLabels.Kit kit=DrumLabels.noteKit(document,layer,h.note);
+        String label=kit==DrumLabels.Kit.NONE?"Pitch "+pitchName(h.note.pitch()):"Drum "+noteLabel(layer,h.note,h.note.pitch())+" ("+pitchName(h.note.pitch())+")";
+        return layer.name+" | "+label+" (MIDI "+h.note.pitch()+") | Tick "+h.note.start()+"-"+h.note.end()+
                (playable?"":" | OUTSIDE LOTRO PLAYABLE RANGE");
     }
     @Override protected void paintComponent(Graphics g0){
@@ -513,7 +705,9 @@ public final class PianoRollPanel extends JComponent {
             int last=Math.max(0,127-(view.y+view.height-TOP)/rowHeight-2);
             for(int p=first;p>=last;p--){
                 int yy=y(p);boolean black=Set.of(1,3,6,8,10).contains(p%12);
-                g.setColor(inScale(p)?(black?new Color(40,48,60):new Color(54,62,74)):(black?new Color(26,29,37):new Color(32,36,44)));g.fillRect(KEY_WIDTH,yy,getWidth()-KEY_WIDTH,rowHeight);
+                g.setColor(keyboardKit!=DrumLabels.Kit.NONE
+                    ? (drumKeyName(p)==null?new Color(26,29,37):p%2==0?new Color(54,62,74):new Color(40,48,60))
+                    : inScale(p)?(black?new Color(40,48,60):new Color(54,62,74)):(black?new Color(26,29,37):new Color(32,36,44)));g.fillRect(keyboardWidth,yy,getWidth()-keyboardWidth,rowHeight);
                 g.setColor(new Color(23,26,33));g.drawLine(0,yy,getWidth(),yy);
             }
             long left=tick(view.x),right=tick(view.x+view.width);
@@ -554,7 +748,7 @@ public final class PianoRollPanel extends JComponent {
                     // Label the sounding pitch, including the pitch shown during a drag.
                     // Measure the full name, including accidentals and octave, rather
                     // than relying on a fixed MIDI-number width threshold.
-                    NoteLabel label=fittingNoteLabel(g,p,width-10,rowHeight-5);
+                    NoteLabel label=fittingNoteLabel(g,noteLabel(noteLayer,n,p),width-10,rowHeight-5);
                     if(label!=null){
                         Rectangle ink=label.ink();
                         int baseline=yy+3+(rowHeight-5-ink.height)/2-ink.y;
@@ -571,11 +765,11 @@ public final class PianoRollPanel extends JComponent {
             }
             if(marquee!=null){g.setColor(new Color(142,189,255,60));g.fill(marquee);
                 g.setColor(new Color(168,207,255));g.setStroke(new BasicStroke(1.5f));g.draw(marquee);}
-            // The pinned keyboard and pinned timeline draw their own corner.
+            // The keyboard child paints over the grid; the ruler is independent.
         }finally{g.dispose();}
     }
     private Hit hit(Point p){
-        if(document==null||p.y<TOP)return null;
+        if(document==null||p.y<TOP||p.x<editableLeft())return null;
         List<Integer> ids=visibleLayers();
         for(int index=ids.size()-1;index>=0;index--){
             int i=ids.get(index);List<EditableNote> all=document.layer(i).notes;
@@ -586,8 +780,8 @@ public final class PianoRollPanel extends JComponent {
         return null;
     }
     private void pressed(MouseEvent e){
-        if(document==null||!SwingUtilities.isLeftMouseButton(e))return;
-        requestFocusInWindow();anchor=e.getPoint();pointer=e.getPoint();dragging=false;selectingBox=false;
+        if(document==null||!SwingUtilities.isLeftMouseButton(e)||(e.getY()>=TOP&&e.getX()<editableLeft()))return;
+        cancelDragInteraction();requestFocusInWindow();anchor=e.getPoint();pointer=e.getPoint();dragging=false;selectingBox=false;
         seeking=e.getY()<TOP || (Math.abs(e.getX()-x(playheadTick))<=4 && e.isAltDown()
                 && !(isNoteCreationClick(e) && hit(e.getPoint()) == null));
         if(seeking){setPlayheadTick(snapped(tick(e.getX())));onSeek.run();return;}
@@ -603,15 +797,23 @@ public final class PianoRollPanel extends JComponent {
     }
     private void dragged(MouseEvent e){
         if(document==null||anchor==null)return;
-        pointer=e.getPoint();
-        if(seeking){setPlayheadTick(snapped(tick(e.getX())));onSeek.run();return;}
+        JViewport viewport=dragViewport();
+        trackEdgePointer(e,viewport);
+        updateDrag(viewport==null?e.getPoint():gridDragPoint(viewport,edgePointer));
+    }
+    private void updateDrag(Point point){
+        if(document==null || anchor==null)return;
+        pointer=point;
+        if(seeking){seekDragAt(point.x,null,false);return;}
         if(marquee!=null){
             selectingBox=true;
-            int x=Math.min(anchor.x,e.getX()),y=Math.min(anchor.y,e.getY());
-            marquee=new Rectangle(x,y,Math.abs(e.getX()-anchor.x),Math.abs(e.getY()-anchor.y));repaint();return;
+            // The original anchor is in song coordinates, not the current viewport.
+            // Do not clip away previously swept notes as the keyboard scrolls over them.
+            int x=Math.max(keyboardWidth,Math.min(anchor.x,point.x)),y=Math.min(anchor.y,point.y);
+            marquee=new Rectangle(x,y,Math.max(0,Math.max(anchor.x,point.x)-x),Math.abs(point.y-anchor.y));repaint();return;
         }
         if(selected.isEmpty())return;
-        int dx=e.getX()-anchor.x,dy=e.getY()-anchor.y;
+        int dx=point.x-anchor.x,dy=point.y-anchor.y;
         if(Math.abs(dx)<3&&Math.abs(dy)<3&&!dragging)return;
         dragging=true;
         previewTick=gridDragDelta(dx/scale());
@@ -619,7 +821,8 @@ public final class PianoRollPanel extends JComponent {
         repaint();
     }
     private void released(){
-        if(document==null){anchor=null;return;}
+        stopEdgeScroll();
+        if(document==null || anchor==null){cancelDragInteraction();return;}
         if(marquee!=null){
             if(selectingBox && marquee.width>1 && marquee.height>1){
                 for(int layer:visibleLayers())for(EditableNote n:document.layer(layer).notes){
@@ -642,11 +845,10 @@ public final class PianoRollPanel extends JComponent {
                 for(EditableNote n:document.layer(first.layer()).notes)
                     if(n.id().equals(first.id())){onAudition.accept(n,document.layer(first.layer()));break;}}
         }
-        anchor=null;pointer=null;dragging=false;selectingBox=false;seeking=false;
-        previewTick=0;previewPitch=0;repaint();
+        cancelDragInteraction();
     }
     private void add(MouseEvent e){
-        if(document==null || hit(e.getPoint())!=null)return;
+        if(document==null || e.getX()<editableLeft() || e.getY()<TOP || hit(e.getPoint())!=null)return;
         if(audibleFilterActive() && !visibleLayers().contains(layerIndex)){
             onClipboardMessage.accept("Selected part is hidden; disable Show only audible or use single-part view to add notes");
             return;
@@ -696,7 +898,8 @@ public final class PianoRollPanel extends JComponent {
         JViewport viewport=(JViewport)SwingUtilities.getAncestorOfClass(JViewport.class,this);
         Point origin=viewport==null?null:viewport.getViewPosition();
         int px=e.getX(),py=e.getY();
-        int newX=(int)Math.round(KEY_WIDTH+(px-KEY_WIDTH)*quarterWidth/(double)oldWidth);
+        int newX=(int)Math.round(keyboardWidth+(Math.max(keyboardWidth,px)-keyboardWidth)*quarterWidth/(double)oldWidth);
+        if(px<keyboardWidth)newX=px;
         int newY=(int)Math.round(TOP+(py-TOP)*rowHeight/(double)oldHeight);
         revalidate();repaint();onZoom.run();
         if(viewport!=null&&origin!=null){
@@ -707,5 +910,5 @@ public final class PianoRollPanel extends JComponent {
             });
         }
     }
-    private void notifyEdit(){detectKey();onEdit.run();revalidate();repaint();}
+    private void notifyEdit(){refreshKeyboard();detectKey();onEdit.run();revalidate();repaint();}
 }
