@@ -6,7 +6,7 @@
 </p>
 
 
-# Maestro-Editor 4.7.7-B2 (Beta 2)
+# Maestro-Editor 4.7.7-B4 (Beta 4)
 
 This fork written and maintained by Sinduriel of The Feral Housewives (Sting)
 
