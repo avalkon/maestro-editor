@@ -14,6 +14,16 @@ For End Users:
 
 See [latest releases](https://github.com/avalkon/maestro-editor/releases)  for downloads.
 
+Fixed in beta 4:
+
+- Fixed composed ABC export not marking natural notes after accidentals in the same bar (This issue exposed itself composing in Gm, an A^(Bb) would turn subsequent A's(A) in the same bar into A^'s(Bb), now any natural after an accidental uses = preceding it, same as normal Maestro exports.)
+- Fixed that Maestro would silently change note timing on export if notes were too short or had too fast an attack.
+- Oversize chords now warn when exporting a composed ABC with the location of chords over 6 notes.
+- Timing issues now warn instead of silently modifying the musical sound if there's an unplayable section/note.
+- Composition export format now matches normal Maestro export formatting, except that musical bar notation is retained to ensure correct musicality.
+- Fixed authored exports being in their actual key instead of c-maj, which made lotro play strange stuff instead.
+
+
 Beta 2.1 fixes a whole host of things you may or may not have even noticed. 
 
 Fixed:
