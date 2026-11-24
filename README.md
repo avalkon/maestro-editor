@@ -1,9 +1,10 @@
 <p align="center">
-<a href="https://github.com/avalkon/maestro-editor/releases"><img src="https://img.shields.io/github/downloads/avalkon/maestro-editor/total?label=Downloads" alt="Downloads" /></a>
+<img src="https://img.shields.io/github/downloads/avalkon/maestro-editor/total?label=Downloads" alt="Downloads" />
  <img src="https://img.shields.io/badge/Windows-supported-0078D6?logo=windows&logoColor=white" alt="Windows" />
   <img src="https://img.shields.io/badge/Linux-supported-FCC624?logo=linux&logoColor=white" alt="Linux" />
   <img src="https://img.shields.io/badge/macOS-supported-000000?logo=apple&logoColor=white" alt="macOS" />
 </p>
+
 
 # Maestro-Editor 4.7.7-B2 (Beta 2)
 
